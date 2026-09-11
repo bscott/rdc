@@ -52,6 +52,21 @@ CLI are clients. The MCP layer converts pixels in the last screenshot to desktop
 9. **Secrets never enter the tree.** No tokens, keys or hostnames of real people in tests or
    docs. Use `studio-mac`, `alice@example.com`.
 
+## Tests are the bar
+
+- New logic ships with unit tests; every bug fix ships with a regression test that fails
+  without the fix.
+- Anything touching authentication, capabilities, routes or the audit log gets a case in
+  `src/server/tests.rs`, which drives the real router with a fake desktop and identity table.
+- Platform-specific code is described in the PR: which OS, what you ran.
+- Never weaken or delete a test to get green. If a test is wrong, say why in the PR.
+
+## Release flow
+
+Pull requests target the current `release/<version>` branch. `main` holds released code only,
+is protected, and only changes through an approved pull request from a release branch. Tags
+are cut from `main` after that merge.
+
 ## Before you open a pull request
 
 ```sh

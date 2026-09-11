@@ -5,6 +5,15 @@ builds the GitHub release body from the matching `## <version>` section.
 
 ## Unreleased
 
+### Changed
+- Release flow: pull requests target a `release/<version>` branch, which is tested on real
+  machines before a reviewed merge into `main`. `main` is protected. CONTRIBUTING and AGENTS
+  spell out the testing bar: unit tests for new logic, a regression test per bug fix, and a
+  router test for anything touching authentication, capabilities, routes or the audit log.
+- Router tests (`src/server/tests.rs`) drive the real axum stack with a fake desktop and a
+  fake identity table: Host check, unknown and non-Tailscale peers, per-capability denials,
+  screenshot headers, and audit completeness and sanitisation.
+
 ### Fixed
 - Audit completeness that 0.3.0's notes claimed but did not ship: `whoami`, `/health`, unknown
   routes, malformed action bodies and screenshot parameter errors are now written to the audit

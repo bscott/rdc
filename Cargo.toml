@@ -52,6 +52,10 @@ windows = { version = "0.62", features = [
     "Win32_System_Threading",
 ] }
 
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+
 [profile.release]
 lto = "thin"
 strip = true
