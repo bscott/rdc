@@ -65,7 +65,38 @@ printf '%s\n' \
 | `skills/rdc/` | the agent skill |
 | `docs/` | user documentation |
 
+## How changes reach a release
+
+1. Every release has a branch named `release/<version>` (for example `release/0.4.0`). Open your
+   pull request against the **current release branch**, not `main`.
+2. CI runs on the pull request: rustfmt, clippy with warnings as errors, and the tests, on
+   Linux, macOS and Windows. All three must pass. First-time contributors' runs wait for a
+   maintainer to approve them.
+3. A maintainer reviews and merges into the release branch. The release branch is then tested
+   on real machines.
+4. When the release is ready, a pull request from the release branch to `main` is reviewed and
+   approved by a person, merged, and tagged. `main` only ever contains released code; it is
+   protected and cannot be pushed to directly.
+
+## Tests are required
+
+Pull requests are expected to come with tests, and reviewers will ask for them. The bar:
+
+- **New logic gets unit tests.** Parsers, mapping functions, policy decisions, anything with
+  branches. Put them in a `#[cfg(test)] mod tests` next to the code.
+- **Every bug fix gets a regression test** that fails without the fix.
+- **Server behaviour gets a router test.** `src/server/tests.rs` drives the real axum router
+  with a fake `Desktop` and a fake identity source; add a case there when you touch
+  authentication, capabilities, routes or the audit log.
+- **Platform code states what was run.** Code behind `cfg(target_os)` cannot be tested in CI
+  beyond compiling, so the PR description must say which OS you ran it on and what you did.
+- Tests must be deterministic, must not need a network or a real display, and must clean up
+  files they create.
+
 ## Pull request checklist
+
+- [ ] The PR targets the current `release/<version>` branch.
+- [ ] Tests are included (see above).
 
 - [ ] `cargo fmt`, `cargo clippy --all-targets -- -D warnings` and `cargo test` pass locally.
 - [ ] Say which platforms you actually ran on, and how (foreground, service, MCP).
@@ -86,6 +117,19 @@ printf '%s\n' \
   aarch64-apple-darwin`, run `cargo clippy --target <triple> --all-targets -- -D warnings` for
   both; CI runs clippy with warnings as errors on every platform, and a lint that only fires on
   one of them will fail the build there.
+
+## Releasing (maintainers)
+
+1. On the release branch, move the **Unreleased** entries in `CHANGELOG.md` under a new
+   `## <version> — <date>` heading and bump `version` in `Cargo.toml`.
+2. Test the release branch on the real machines: `rdc doctor`, screenshot, input, focus, and
+   the MCP tools from Claude Code.
+3. Open a pull request from `release/<version>` to `main`. A person reviews and approves it,
+   and CI must be green.
+4. Merge, then from `main`:
+   `git tag -a v<version> -m "rdc <version>" && git push origin v<version>`. The release job
+   builds all platforms and turns the changelog section into the release notes.
+5. Create the next `release/<version>` branch from `main`.
 
 ## License and sign-off
 

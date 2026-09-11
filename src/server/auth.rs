@@ -4,6 +4,7 @@ use super::{AppState, is_tailscale_ip};
 use crate::config::ResolvedGrant;
 use crate::proto::{ApiError, Capability, Identity, RdcError};
 use crate::tailscale::Tailscale;
+use async_trait::async_trait;
 use axum::{
     body::Body,
     extract::{ConnectInfo, Request, State},
@@ -13,6 +14,7 @@ use axum::{
 };
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
@@ -102,8 +104,21 @@ fn normalize_host(raw: &str) -> String {
     h.trim_end_matches('.').to_string()
 }
 
+/// Where identities come from. `Tailscale` in production; tests substitute a table.
+#[async_trait]
+pub trait Identify: Send + Sync {
+    async fn whois(&self, ip: IpAddr) -> Result<Identity, RdcError>;
+}
+
+#[async_trait]
+impl Identify for Tailscale {
+    async fn whois(&self, ip: IpAddr) -> Result<Identity, RdcError> {
+        Tailscale::whois(self, ip).await
+    }
+}
+
 pub struct Auth {
-    ts: Tailscale,
+    ts: Arc<dyn Identify>,
     allow: Allowlist,
     hosts: HostAllow,
     dev_loopback: bool,
@@ -113,7 +128,7 @@ pub struct Auth {
 const CACHE_TTL: Duration = Duration::from_secs(30);
 
 impl Auth {
-    pub fn new(ts: Tailscale, allow: Allowlist, hosts: HostAllow, dev_loopback: bool) -> Self {
+    pub fn new(ts: Arc<dyn Identify>, allow: Allowlist, hosts: HostAllow, dev_loopback: bool) -> Self {
         Self { ts, allow, hosts, dev_loopback, cache: Mutex::new(HashMap::new()) }
     }
 

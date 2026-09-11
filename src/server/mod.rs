@@ -3,6 +3,8 @@
 pub mod audit;
 mod auth;
 mod routes;
+#[cfg(test)]
+mod tests;
 
 use crate::config::{AuditConfig, ResolvedGrant};
 use crate::desktop::Desktop;
@@ -82,7 +84,8 @@ pub async fn serve(desktop: Arc<dyn Desktop>, ts: Tailscale, opts: ServeOpts) ->
         hosts.extend(["localhost".to_string(), "127.0.0.1".to_string(), "::1".to_string()]);
     }
     tracing::debug!(?hosts, "accepted Host names");
-    let auth = auth::Auth::new(ts, Allowlist::new(opts.grants), auth::HostAllow::new(hosts), opts.dev_loopback);
+    let auth =
+        auth::Auth::new(Arc::new(ts), Allowlist::new(opts.grants), auth::HostAllow::new(hosts), opts.dev_loopback);
     if opts.dev_loopback {
         tracing::warn!("--dev-loopback: requests from 127.0.0.1 are NOT authenticated");
     }
