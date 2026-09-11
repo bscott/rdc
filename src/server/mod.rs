@@ -71,7 +71,7 @@ pub async fn plan_listen(
         hosts.extend(ips.iter().map(|ip| ip.to_string()));
     }
     let names = ts.self_names().await;
-    let node = names.last().cloned().unwrap_or_else(|| bind_ip.to_string());
+    let node = node_name(&names).unwrap_or_else(|| bind_ip.to_string());
     hosts.extend(names);
     hosts.extend(extra_hosts);
     if dev_loopback {
@@ -144,6 +144,15 @@ pub async fn serve(desktop: Arc<dyn Desktop>, ts: Tailscale, opts: ServeOpts) ->
     Ok(())
 }
 
+/// The short name to stamp into audit entries: the first label of the MagicDNS name
+/// (`studio-mac` from `studio-mac.example.ts.net`), which is what people type in `allow` and
+/// in the viewer's filters. Falls back to whatever name tailscaled gave us.
+fn node_name(names: &[String]) -> Option<String> {
+    let first = names.first()?;
+    let label = first.split('.').next().unwrap_or(first);
+    Some(if label.is_empty() { first.clone() } else { label.to_string() })
+}
+
 /// 100.64.0.0/10 (CGNAT range Tailscale uses) or fd7a:115c:a1e0::/48.
 pub fn is_tailscale_ip(ip: IpAddr) -> bool {
     match ip {
@@ -155,5 +164,18 @@ pub fn is_tailscale_ip(ip: IpAddr) -> bool {
             let s = v6.segments();
             s[0] == 0xfd7a && s[1] == 0x115c && s[2] == 0xa1e0
         }
+    }
+}
+
+#[cfg(test)]
+mod node_name_tests {
+    use super::node_name;
+
+    #[test]
+    fn prefers_the_magicdns_label_over_the_hostname() {
+        let names = vec!["brians-m4-mac-mini.example.ts.net".to_string(), "brian’s m4 mac mini".to_string()];
+        assert_eq!(node_name(&names).as_deref(), Some("brians-m4-mac-mini"));
+        assert_eq!(node_name(&["omen".to_string()]).as_deref(), Some("omen"));
+        assert_eq!(node_name(&[]), None);
     }
 }

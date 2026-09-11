@@ -225,6 +225,8 @@ async fn screenshot_returns_geometry_headers() {
     assert_eq!(resp.headers().get("x-rdc-rect").unwrap(), "0,0,1440,960");
     assert_eq!(resp.headers().get("x-rdc-size").unwrap(), "720,480");
     assert_eq!(resp.headers().get("content-type").unwrap(), "image/jpeg");
+    let shots: Vec<_> = audit_lines(&h).into_iter().filter(|e| e.path == "/v1/screenshot").collect();
+    assert_eq!(shots[0].action.as_deref(), Some("screenshot primary jpg max=800"));
     let (st, body) = call(&h, ALICE, "100.64.0.1", "GET", "/v1/screenshot?display=zzz", None).await;
     assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
 }

@@ -14,8 +14,9 @@ builds the GitHub release body from the matching `## <version>` section.
   follows local files with `--follow`), stores them, and serves a page that updates as entries
   arrive, with text, outcome and host filters. Same gate as the daemon: Tailscale bind, Host
   check, `whois` identity, allowlist. Configured under `[audit_view]`.
-- Audit entries carry `host` (the daemon's node name); the viewer adds `via` (the sending
-  node) and never trusts the sender for it. Old lines without `host` still parse.
+- Audit entries carry `host` (the daemon's node name, the first label of its MagicDNS name);
+  the viewer adds `via` (the sending node) and never trusts the sender for it. Old lines without
+  `host` still parse.
 
 ### Changed
 - Release flow: pull requests target a `release/<version>` branch, which is tested on real
