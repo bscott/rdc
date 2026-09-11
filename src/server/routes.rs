@@ -116,7 +116,10 @@ async fn screenshot_h(
         }
     };
     let req = ScreenshotReq { display, format, max_long_edge: q.max };
-    let action = format!("screenshot {display} {} max={:?}", format.ext(), q.max);
+    let action = match q.max {
+        Some(m) => format!("screenshot {display} {} max={m}", format.ext()),
+        None => format!("screenshot {display} {}", format.ext()),
+    };
     match audited(&s, &id, "GET", "/v1/screenshot", Capability::View, Some(action), s.desktop.screenshot(req)).await {
         Ok(shot) => {
             let mut h = HeaderMap::new();
