@@ -57,7 +57,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/whoami", get(whoami_h))
         .route("/health", get(health_h))
         .fallback(not_found_h)
-        .layer(middleware::from_fn_with_state(state.clone(), auth::middleware))
+        .layer(middleware::from_fn_with_state(state.clone(), auth::middleware::<AppState>))
         .with_state(state)
 }
 

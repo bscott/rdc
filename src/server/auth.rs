@@ -1,6 +1,6 @@
 //! Identify the peer behind each connection with tailscaled whois and check the allowlist.
 
-use super::{AppState, is_tailscale_ip};
+use super::is_tailscale_ip;
 use crate::config::ResolvedGrant;
 use crate::proto::{ApiError, Capability, Identity, RdcError};
 use crate::tailscale::Tailscale;
@@ -117,6 +117,13 @@ impl Identify for Tailscale {
     }
 }
 
+/// What the auth middleware needs from an application state: the policy, and somewhere to
+/// write the entries for requests it refuses.
+pub trait Gate: Clone + Send + Sync + 'static {
+    fn auth(&self) -> &Auth;
+    fn record(&self, e: super::audit::Entry);
+}
+
 pub struct Auth {
     ts: Arc<dyn Identify>,
     allow: Allowlist,
@@ -202,8 +209,8 @@ pub fn error_response(e: &RdcError) -> Response {
     (status, axum::Json(body)).into_response()
 }
 
-pub async fn middleware(
-    State(state): State<AppState>,
+pub async fn middleware<S: Gate>(
+    State(state): State<S>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     mut req: Request<Body>,
     next: Next,
@@ -216,16 +223,16 @@ pub async fn middleware(
         .or_else(|| req.uri().authority().map(|a| a.to_string()));
     let (method, path) = (req.method().to_string(), req.uri().path().to_string());
     let peer_ip = peer.ip().to_string();
-    if let Err(e) = state.auth.check_host(host.as_deref()) {
+    if let Err(e) = state.auth().check_host(host.as_deref()) {
         tracing::warn!(peer = %peer_ip, error = %e, "rejected");
-        state.audit.record(super::audit::Entry::new(&peer_ip, None, &method, &path).denied(421, e.message()));
+        state.record(super::audit::Entry::new(&peer_ip, None, &method, &path).denied(421, e.message()));
         return (
             StatusCode::MISDIRECTED_REQUEST,
             axum::Json(ApiError { code: e.code().into(), message: e.message().to_string() }),
         )
             .into_response();
     }
-    match state.auth.authorize(peer.ip()).await {
+    match state.auth().authorize(peer.ip()).await {
         Ok(id) => {
             tracing::info!(peer = %peer_ip, who = id.label(), method = %method, path = %path, "request");
             req.extensions_mut().insert(id);
@@ -235,7 +242,7 @@ pub async fn middleware(
             tracing::warn!(peer = %peer_ip, error = %e, "rejected");
             let resp = error_response(&e);
             let entry = super::audit::Entry::new(&peer_ip, None, &method, &path);
-            state.audit.record(match e {
+            state.record(match e {
                 RdcError::Unauthorized(_) | RdcError::Forbidden(_) => entry.denied(resp.status().as_u16(), e.message()),
                 _ => entry.error(resp.status().as_u16(), e.message()),
             });

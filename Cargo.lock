@@ -2245,6 +2245,7 @@ dependencies = [
  "clap",
  "dirs",
  "enigo",
+ "futures",
  "http-body-util",
  "image",
  "libc",

@@ -24,7 +24,9 @@ button, and carries on.
   address and asks the local `tailscaled` who each caller is. You allow tailnet logins, device
   names or tags. Your tailnet is the security boundary.
 - **Scoped access and an audit trail.** Each allowed identity can be limited to `view`, `input`
-  or `clipboard`, and every request or rejection is written to a JSON-lines audit log.
+  or `clipboard`, and every request or rejection is written to a JSON-lines audit log. Daemons
+  can stream it to `rdc audit-view`, a live page for all your machines, or to any collector
+  that takes newline-delimited JSON over HTTP.
 - **No shell.** rdc is a screen-and-input surface only. Use SSH for commands.
 - **One binary**, written in Rust. The same executable is the daemon, the CLI and the MCP server.
 

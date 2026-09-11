@@ -16,6 +16,9 @@ pub struct Config {
     pub serve: ServeConfig,
     #[serde(default)]
     pub targets: BTreeMap<String, Target>,
+    /// Settings for `rdc audit-view`, the live audit viewer.
+    #[serde(default)]
+    pub audit_view: AuditViewConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,19 +157,22 @@ impl Grant {
     }
 }
 
+fn resolve_allow(entries: &[AllowEntry], where_: &str) -> Result<Vec<ResolvedGrant>> {
+    let mut out = Vec::new();
+    for e in entries {
+        match e {
+            AllowEntry::Simple(s) if !s.trim().is_empty() => out.push(ResolvedGrant::full(vec![s.trim().to_string()])),
+            AllowEntry::Simple(_) => {}
+            AllowEntry::Grant(g) => out.push(g.resolve().with_context(|| format!("in {where_}"))?),
+        }
+    }
+    Ok(out)
+}
+
 impl ServeConfig {
     /// Every grant from `allow` and `[[serve.grant]]`, validated.
     pub fn grants(&self) -> Result<Vec<ResolvedGrant>> {
-        let mut out = Vec::new();
-        for e in &self.allow {
-            match e {
-                AllowEntry::Simple(s) if !s.trim().is_empty() => {
-                    out.push(ResolvedGrant::full(vec![s.trim().to_string()]))
-                }
-                AllowEntry::Simple(_) => {}
-                AllowEntry::Grant(g) => out.push(g.resolve().context("in [serve].allow")?),
-            }
-        }
+        let mut out = resolve_allow(&self.allow, "[serve].allow")?;
         for g in &self.grant {
             out.push(g.resolve().context("in [[serve.grant]]")?);
         }
@@ -201,11 +207,93 @@ pub struct AuditConfig {
     /// How many rotated files to keep (`audit.jsonl.1` … `.N`).
     #[serde(default = "default_audit_keep")]
     pub keep: u32,
+    /// Also POST every entry, as JSON lines, to this HTTP URL: an `rdc audit-view` instance or
+    /// any collector that accepts `application/x-ndjson`.
+    #[serde(default)]
+    pub stream: Option<String>,
+    /// Sent as `Authorization: Bearer …` with the stream. Not needed for `rdc audit-view`,
+    /// which identifies the sender through Tailscale.
+    #[serde(default)]
+    pub stream_token: Option<String>,
 }
 
 impl Default for AuditConfig {
     fn default() -> Self {
-        Self { enabled: true, path: None, max_size_mb: default_audit_mb(), keep: default_audit_keep() }
+        Self {
+            enabled: true,
+            path: None,
+            max_size_mb: default_audit_mb(),
+            keep: default_audit_keep(),
+            stream: None,
+            stream_token: None,
+        }
+    }
+}
+
+pub const DEFAULT_VIEW_PORT: u16 = 7771;
+
+/// `[audit_view]`: the live viewer that daemons stream their audit entries to.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditViewConfig {
+    #[serde(default = "default_view_port")]
+    pub port: u16,
+    /// Address to bind. Default: this node's Tailscale IPv4.
+    #[serde(default)]
+    pub bind: Option<String>,
+    /// Who may send entries and who may open the page. Same shapes as `[serve].allow`;
+    /// capabilities are ignored here, membership is what counts.
+    #[serde(default)]
+    pub allow: Vec<AllowEntry>,
+    /// Extra accepted `Host` names, as for `[serve]`.
+    #[serde(default)]
+    pub hosts: Vec<String>,
+    /// Keep received entries in this file. Default: `rdc/audit-view.jsonl` in the state dir.
+    /// Set `store = false` on the command line with `--no-store`.
+    #[serde(default)]
+    pub store: Option<PathBuf>,
+    /// Local audit files to follow as well (for the machine the viewer runs on).
+    #[serde(default)]
+    pub follow: Vec<PathBuf>,
+    #[serde(default = "default_audit_mb")]
+    pub max_size_mb: u64,
+    #[serde(default = "default_audit_keep")]
+    pub keep: u32,
+}
+
+impl Default for AuditViewConfig {
+    fn default() -> Self {
+        Self {
+            port: DEFAULT_VIEW_PORT,
+            bind: None,
+            allow: vec![],
+            hosts: vec![],
+            store: None,
+            follow: vec![],
+            max_size_mb: default_audit_mb(),
+            keep: default_audit_keep(),
+        }
+    }
+}
+
+fn default_view_port() -> u16 {
+    DEFAULT_VIEW_PORT
+}
+
+impl AuditViewConfig {
+    pub fn grants(&self) -> Result<Vec<ResolvedGrant>> {
+        resolve_allow(&self.allow, "[audit_view].allow")
+    }
+
+    pub fn store_config(&self) -> AuditConfig {
+        AuditConfig {
+            enabled: true,
+            path: Some(self.store.clone().unwrap_or_else(|| state_dir().join("audit-view.jsonl"))),
+            max_size_mb: self.max_size_mb,
+            keep: self.keep,
+            stream: None,
+            stream_token: None,
+        }
     }
 }
 
@@ -318,6 +406,7 @@ pub fn load() -> Result<Config> {
     let cfg: Config = toml::from_str(&raw).with_context(|| format!("parsing {}", p.display()))?;
     // Fail early on malformed grants so the daemon never starts with a half-read allowlist.
     cfg.serve.grants().with_context(|| format!("in {}", p.display()))?;
+    cfg.audit_view.grants().with_context(|| format!("in {}", p.display()))?;
     Ok(cfg)
 }
 

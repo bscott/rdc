@@ -5,6 +5,18 @@ builds the GitHub release body from the matching `## <version>` section.
 
 ## Unreleased
 
+### Added
+- **Audit streaming.** `[serve.audit] stream = "http://…/v1/ingest"` (or `rdc serve
+  --audit-stream URL`) POSTs every audit entry, batched as `application/x-ndjson`, to an HTTP
+  endpoint, with retry and backoff; the local file stays the record. `stream_token` adds a
+  bearer token for third-party collectors.
+- **`rdc audit-view`**, a live audit viewer: receives streams from any number of daemons (and
+  follows local files with `--follow`), stores them, and serves a page that updates as entries
+  arrive, with text, outcome and host filters. Same gate as the daemon: Tailscale bind, Host
+  check, `whois` identity, allowlist. Configured under `[audit_view]`.
+- Audit entries carry `host` (the daemon's node name); the viewer adds `via` (the sending
+  node) and never trusts the sender for it. Old lines without `host` still parse.
+
 ### Changed
 - Release flow: pull requests target a `release/<version>` branch, which is tested on real
   machines before a reviewed merge into `main`. `main` is protected. CONTRIBUTING and AGENTS
