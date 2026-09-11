@@ -5,6 +5,8 @@ builds the GitHub release body from the matching `## <version>` section.
 
 ## Unreleased
 
+## 0.4.0 — 2026-09-11
+
 ### Added
 - **Audit streaming.** `[serve.audit] stream = "http://…/v1/ingest"` (or `rdc serve
   --audit-stream URL`) POSTs every audit entry, batched as `application/x-ndjson`, to an HTTP
