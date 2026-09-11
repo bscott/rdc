@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rdc audit</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #fbfaf7; --fg: #1d1f24; --muted: #6b6f7a; --line: #e2e0da; --row: #f2f0eb;
+    --ok: #2f6f4e; --denied: #b3261e; --denied-bg: #fbe9e7; --error: #8a5a00; --error-bg: #fff3d6;
+    --accent: #2b5ea7; --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #15171b; --fg: #e6e4de; --muted: #9a9ea8; --line: #2c2f36; --row: #1c1f25;
+      --ok: #7fc99f; --denied: #ff8a80; --denied-bg: #3a1f1d; --error: #ffcf70; --error-bg: #3a3016;
+      --accent: #8ab4f8;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.45 system-ui, sans-serif; }
+  header { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; padding: 10px 16px;
+           border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--bg); z-index: 1; }
+  header h1 { font-size: 15px; margin: 0 8px 0 0; font-weight: 600; letter-spacing: .02em; }
+  header label { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); }
+  input, select, button { font: inherit; color: var(--fg); background: var(--row); border: 1px solid var(--line);
+                          border-radius: 6px; padding: 4px 8px; }
+  input[type=search] { min-width: 18em; }
+  button { cursor: pointer; }
+  .status { margin-left: auto; display: inline-flex; gap: 8px; align-items: center; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+  .dot.live { background: var(--ok); }
+  .dot.paused { background: var(--error); }
+  main { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 5px 10px; border-bottom: 1px solid var(--line); vertical-align: top; white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; }
+  td.what, td.detail { font-family: var(--mono); font-size: 12.5px; white-space: pre-wrap; word-break: break-word; }
+  td.detail { color: var(--muted); max-width: 40em; }
+  tr.denied td { background: var(--denied-bg); }
+  tr.denied td.outcome { color: var(--denied); font-weight: 600; }
+  tr.error td { background: var(--error-bg); }
+  tr.error td.outcome { color: var(--error); font-weight: 600; }
+  tr.ok td.outcome { color: var(--ok); }
+  td.ms { color: var(--muted); text-align: right; }
+  .empty { padding: 40px 16px; color: var(--muted); text-align: center; }
+  .via { color: var(--muted); font-size: 12px; }
+  footer { padding: 10px 16px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--line); }
+  code { font-family: var(--mono); }
+</style>
+</head>
+<body>
+<header>
+  <h1>rdc audit</h1>
+  <input id="q" type="search" placeholder="filter: who, host, action, detail" autocomplete="off">
+  <label>outcome
+    <select id="outcome">
+      <option value="">all</option>
+      <option value="ok">ok</option>
+      <option value="denied">denied</option>
+      <option value="error">error</option>
+    </select>
+  </label>
+  <label>host <select id="host"><option value="">all</option></select></label>
+  <label><input id="pause" type="checkbox"> pause</label>
+  <button id="clear" type="button">clear</button>
+  <span class="status"><span id="dot" class="dot"></span><span id="count">0</span> shown · <span id="total">0</span> total</span>
+</header>
+<main>
+  <table>
+    <thead><tr>
+      <th>time</th><th>host</th><th>who</th><th>what</th><th>outcome</th><th>code</th><th>ms</th><th>detail</th>
+    </tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <div id="empty" class="empty">Waiting for entries. Point a daemon here with
+    <code>[serve.audit] stream = "http://this-host:port/v1/ingest"</code>.</div>
+</main>
+<footer>Newest first. Entries are shown exactly as recorded; typed text never appears in the log.</footer>
+<script>
+(function () {
+  'use strict';
+  var MAX_ROWS = 5000;
+  var entries = [];           // newest first
+  var hosts = {};
+  var pendingWhilePaused = [];
+  var $ = function (id) { return document.getElementById(id); };
+  var rows = $('rows'), q = $('q'), outcomeSel = $('outcome'), hostSel = $('host'), pause = $('pause');
+  var dot = $('dot'), count = $('count'), total = $('total'), empty = $('empty');
+
+  function who(e) { return e.login || e.node || e.peer || ''; }
+  function what(e) { return e.action || (e.method + ' ' + e.path); }
+  function matches(e) {
+    if (outcomeSel.value && e.outcome !== outcomeSel.value) return false;
+    if (hostSel.value && e.host !== hostSel.value) return false;
+    var needle = q.value.trim().toLowerCase();
+    if (!needle) return true;
+    var hay = [e.ts, e.host, who(e), (e.tags || []).join(' '), what(e), e.outcome, String(e.status), e.detail || '', e.via || ''].join(' ').toLowerCase();
+    return hay.indexOf(needle) !== -1;
+  }
+  function cell(cls, text, title) {
+    var td = document.createElement('td');
+    if (cls) td.className = cls;
+    td.textContent = text == null ? '' : String(text);
+    if (title) td.title = title;
+    return td;
+  }
+  function row(e) {
+    var tr = document.createElement('tr');
+    tr.className = e.outcome || '';
+    tr.appendChild(cell('ts', (e.ts || '').replace('T', ' ').replace('Z', '')));
+    var host = cell('host', e.host || '');
+    if (e.via && e.via !== e.host) {
+      var via = document.createElement('div'); via.className = 'via'; via.textContent = 'via ' + e.via; host.appendChild(via);
+    }
+    tr.appendChild(host);
+    tr.appendChild(cell('who', who(e), (e.tags || []).join(' ') + (e.peer ? '\n' + e.peer : '')));
+    tr.appendChild(cell('what', what(e)));
+    tr.appendChild(cell('outcome', e.outcome));
+    tr.appendChild(cell('code', e.status));
+    tr.appendChild(cell('ms', e.ms == null ? '' : e.ms));
+    tr.appendChild(cell('detail', e.detail || ''));
+    return tr;
+  }
+  function noteHost(e) {
+    if (!e.host || hosts[e.host]) return;
+    hosts[e.host] = true;
+    var o = document.createElement('option'); o.value = e.host; o.textContent = e.host; hostSel.appendChild(o);
+  }
+  function render() {
+    var frag = document.createDocumentFragment(), shown = 0;
+    for (var i = 0; i < entries.length; i++) {
+      if (matches(entries[i])) { frag.appendChild(row(entries[i])); shown++; }
+    }
+    rows.textContent = '';
+    rows.appendChild(frag);
+    count.textContent = shown;
+    total.textContent = entries.length;
+    empty.hidden = entries.length > 0;
+  }
+  function add(e, live) {
+    noteHost(e);
+    entries.unshift(e);
+    if (entries.length > MAX_ROWS) entries.length = MAX_ROWS;
+    total.textContent = entries.length;
+    empty.hidden = true;
+    if (!live) return;
+    if (matches(e)) {
+      rows.insertBefore(row(e), rows.firstChild);
+      while (rows.children.length > MAX_ROWS) rows.removeChild(rows.lastChild);
+      count.textContent = Number(count.textContent) + 1;
+    }
+  }
+  function onEntry(ev) {
+    var e;
+    try { e = JSON.parse(ev.data); } catch (err) { return; }
+    if (pause.checked) { pendingWhilePaused.push(e); return; }
+    add(e, true);
+  }
+  function connect() {
+    var es = new EventSource('/v1/events');
+    es.addEventListener('entry', onEntry);
+    es.addEventListener('lagged', function () { load(); });
+    es.onopen = function () { dot.className = 'dot live'; dot.title = 'live'; };
+    es.onerror = function () { dot.className = 'dot'; dot.title = 'reconnecting'; };
+  }
+  function load() {
+    fetch('/v1/recent?n=' + MAX_ROWS, { credentials: 'same-origin' })
+      .then(function (r) { return r.ok ? r.json() : []; })
+      .then(function (list) {
+        entries = [];
+        hosts = {};
+        hostSel.length = 1;
+        for (var i = 0; i < list.length; i++) add(list[i], false);
+        render();
+      })
+      .catch(function () {});
+  }
+  q.addEventListener('input', render);
+  outcomeSel.addEventListener('change', render);
+  hostSel.addEventListener('change', render);
+  pause.addEventListener('change', function () {
+    dot.className = pause.checked ? 'dot paused' : 'dot live';
+    if (!pause.checked) {
+      var held = pendingWhilePaused; pendingWhilePaused = [];
+      for (var i = 0; i < held.length; i++) add(held[i], true);
+    }
+  });
+  $('clear').addEventListener('click', function () { entries = []; render(); });
+  load();
+  connect();
+})();
+</script>
+</body>
+</html>

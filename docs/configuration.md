@@ -44,6 +44,15 @@ enabled = true                 # default
 # path = "/var/log/rdc/audit.jsonl"   # default: rdc/audit.jsonl in the platform state dir
 max_size_mb = 50               # rotate above this size
 keep = 5                       # keep audit.jsonl.1 … .5
+# stream = "http://laptop.example-tailnet.ts.net:7771/v1/ingest"  # also POST entries here
+# stream_token = "..."         # Authorization: Bearer for third-party collectors
+
+# The live viewer, `rdc audit-view`. See "Audit log and live viewer".
+[audit_view]
+port = 7771                    # default
+allow = ["alice@example.com", "tag:rdc-host"]   # who may send entries and open the page
+# store = "/var/log/rdc/audit-view.jsonl"       # default: audit-view.jsonl in the state dir
+# follow = ["/home/alice/.local/state/rdc/audit.jsonl"]  # also show this machine's own log
 
 # Names you can pass to `--target` on the client side.
 [targets.studio-mac]

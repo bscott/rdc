@@ -13,6 +13,12 @@ use std::time::SystemTime;
 pub struct Entry {
     /// RFC 3339 UTC timestamp.
     pub ts: String,
+    /// The machine whose desktop this entry is about (the daemon's node name).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub host: String,
+    /// Set by `rdc audit-view` on entries it received over the network: the node that sent them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
     pub peer: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub login: Option<String>,
@@ -44,6 +50,8 @@ impl Entry {
     pub fn new(peer: &str, id: Option<&Identity>, method: &str, path: &str) -> Self {
         Self {
             ts: now_rfc3339(),
+            host: String::new(),
+            via: None,
             peer: peer.to_string(),
             login: id.and_then(|i| i.login.clone()),
             node: id.map(|i| i.node.clone()),
@@ -81,6 +89,21 @@ impl Entry {
         self.ms = Some(started.elapsed().as_millis() as u64);
         self
     }
+
+    /// Re-sanitize every string field. Used for entries that arrived over the network, whose
+    /// sender may not be an honest `rdc serve`.
+    pub fn sanitized(mut self) -> Self {
+        for f in [&mut self.ts, &mut self.host, &mut self.peer, &mut self.method, &mut self.path, &mut self.outcome] {
+            *f = sanitize(f);
+        }
+        for v in
+            [&mut self.via, &mut self.login, &mut self.node, &mut self.action, &mut self.detail].into_iter().flatten()
+        {
+            *v = sanitize(v);
+        }
+        self.tags = self.tags.iter().take(32).map(|t| sanitize(t)).collect();
+        self
+    }
 }
 
 struct Sink {
@@ -94,16 +117,21 @@ struct Sink {
 pub struct Audit {
     sink: Option<Mutex<Sink>>,
     path: Option<PathBuf>,
+    /// Stamped into entries that do not name a host yet.
+    host: String,
+    stream: Option<super::stream::Streamer>,
 }
 
 impl Audit {
     pub fn disabled() -> Self {
-        Self { sink: None, path: None }
+        Self { sink: None, path: None, host: String::new(), stream: None }
     }
 
-    pub fn open(cfg: &AuditConfig) -> anyhow::Result<Self> {
+    /// Open the audit file named by `cfg`. `host` is this machine's node name; it is written into
+    /// every entry so a viewer collecting several machines can tell them apart.
+    pub fn open(cfg: &AuditConfig, host: &str) -> anyhow::Result<Self> {
         if !cfg.enabled {
-            return Ok(Self::disabled());
+            return Ok(Self { host: host.to_string(), ..Self::disabled() });
         }
         let path = cfg.resolved_path();
         if let Some(dir) = path.parent() {
@@ -120,23 +148,46 @@ impl Audit {
                 written,
             })),
             path: Some(path),
+            host: host.to_string(),
+            stream: None,
         })
+    }
+
+    /// Also send every entry, as JSON lines, to an HTTP endpoint. Best effort: the file stays
+    /// the record; the stream is batched, retried, and dropped when the endpoint stays down.
+    pub fn stream_to(&mut self, url: &str, token: Option<&str>) -> anyhow::Result<()> {
+        self.stream = Some(super::stream::Streamer::spawn(url, token)?);
+        Ok(())
+    }
+
+    /// Flush what the streamer still holds. Call once before exiting.
+    pub async fn shutdown(&self) {
+        if let Some(s) = &self.stream {
+            s.shutdown().await;
+        }
     }
 
     pub fn path(&self) -> Option<&Path> {
         self.path.as_deref()
     }
 
-    pub fn record(&self, e: Entry) {
-        let Some(sink) = &self.sink else { return };
-        let Ok(mut s) = sink.lock() else { return };
-        let mut line = match serde_json::to_string(&e) {
+    pub fn record(&self, mut e: Entry) {
+        if e.host.is_empty() {
+            e.host = self.host.clone();
+        }
+        let line = match serde_json::to_string(&e) {
             Ok(l) => l,
             Err(err) => {
                 tracing::warn!("audit: serialize failed: {err}");
                 return;
             }
         };
+        if let Some(stream) = &self.stream {
+            stream.push(line.clone());
+        }
+        let Some(sink) = &self.sink else { return };
+        let Ok(mut s) = sink.lock() else { return };
+        let mut line = line;
         line.push('\n');
         if s.written + line.len() as u64 > s.max_bytes
             && let Err(err) = s.rotate()
@@ -232,8 +283,9 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("rdc-audit-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("audit.jsonl");
-        let cfg = AuditConfig { enabled: true, path: Some(path.clone()), max_size_mb: 1, keep: 2 };
-        let a = Audit::open(&cfg).unwrap();
+        let cfg =
+            AuditConfig { enabled: true, path: Some(path.clone()), max_size_mb: 1, keep: 2, ..Default::default() };
+        let a = Audit::open(&cfg, "studio-mac").unwrap();
         // Force a tiny cap so rotation triggers.
         a.sink.as_ref().unwrap().lock().unwrap().max_bytes = 400;
         for i in 0..6 {
@@ -251,7 +303,27 @@ mod tests {
         let last = tail(&path, 10).unwrap();
         assert!(!last.is_empty());
         assert!(last.last().unwrap().action.as_deref().unwrap().starts_with("input.key"));
+        assert_eq!(last[0].host, "studio-mac");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn old_lines_without_host_still_parse() {
+        let line = r#"{"ts":"2026-09-01T00:00:00.000Z","peer":"100.64.0.2","method":"GET","path":"/v1/state","outcome":"ok","status":200}"#;
+        let e: Entry = serde_json::from_str(line).unwrap();
+        assert!(e.host.is_empty() && e.via.is_none());
+    }
+
+    #[test]
+    fn sanitized_cleans_every_field() {
+        let mut e = Entry::new("100.64.0.1", None, "GET", "/v1/state");
+        e.host = "mac\u{1b}[2J".into();
+        e.via = Some("x\ny".into());
+        e.tags = vec!["tag:\u{7}a".into()];
+        let e = e.sanitized();
+        assert_eq!(e.host, "mac\u{fffd}[2J");
+        assert_eq!(e.via.as_deref(), Some("x\u{fffd}y"));
+        assert_eq!(e.tags, vec!["tag:\u{fffd}a".to_string()]);
     }
 
     #[test]

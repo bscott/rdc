@@ -114,7 +114,8 @@ fn harness(name: &str) -> Harness {
     let _ = std::fs::remove_dir_all(&dir);
     let audit_path = dir.join("audit.jsonl");
     let audit =
-        Audit::open(&AuditConfig { enabled: true, path: Some(audit_path.clone()), max_size_mb: 1, keep: 1 }).unwrap();
+        Audit::open(&AuditConfig { enabled: true, path: Some(audit_path.clone()), ..Default::default() }, "studio-mac")
+            .unwrap();
     let desktop = Arc::new(FakeDesktop::default());
     let state = AppState { desktop: desktop.clone(), auth: Arc::new(auth), audit: Arc::new(audit) };
     Harness { app: routes::router(state), desktop, audit_path }
@@ -258,6 +259,7 @@ async fn everything_authorized_is_audited() {
     assert_eq!((lines[3].status, lines[3].action.as_deref()), (400, Some("act (unparsed)")));
     assert_eq!(lines[4].status, 400);
     assert_eq!(lines[5].action.as_deref(), Some("input.type 15 chars"), "typed text is never logged");
+    assert!(lines.iter().all(|e| e.host == "studio-mac"), "every entry names the machine");
     let raw = std::fs::read_to_string(&h.audit_path).unwrap();
     assert!(!raw.contains("secret password"));
 }

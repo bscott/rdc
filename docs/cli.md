@@ -37,6 +37,12 @@ Show the last N entries (default 50) of this machine's audit log as a table, or 
 lines with `--json`. The file is `[serve.audit].path` or the platform default. See
 [Configuration](configuration.md#audit-log).
 
+### `rdc audit-view [--port N] [--bind IP] [--allow WHO]... [--store FILE | --no-store] [--follow FILE]...`
+
+Run the live audit viewer: receive JSON-lines audit streams from `rdc serve` instances over
+Tailscale and show them in a browser. Same binding and identity rules as `serve`. Details in
+[Audit log and live viewer](audit.md).
+
 ### `rdc doctor [--request-permissions]`
 
 Prints what rdc can see on this machine: platform and session type, `tailscaled` connectivity and
