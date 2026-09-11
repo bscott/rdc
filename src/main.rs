@@ -9,6 +9,7 @@ mod server;
 mod service;
 mod tailscale;
 mod view;
+mod viewer;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -48,6 +49,34 @@ enum Cmd {
         /// `tag:ops=view`, `studio-laptop=view,clipboard`. Repeatable; adds to config.
         #[arg(long = "allow")]
         allow: Vec<String>,
+        /// Also stream audit entries (JSON lines) to this URL, e.g. an `rdc audit-view`
+        /// instance: `http://laptop.example.ts.net:7771/v1/ingest`. Overrides config.
+        #[arg(long)]
+        audit_stream: Option<String>,
+        /// Bind 127.0.0.1 and skip authentication for loopback. Testing only.
+        #[arg(long)]
+        dev_loopback: bool,
+    },
+    /// Collect audit entries streamed from `rdc serve` instances and show them live in a browser.
+    AuditView {
+        /// Address to bind (default: this node's Tailscale IPv4).
+        #[arg(long)]
+        bind: Option<IpAddr>,
+        /// TCP port (default 7771 or `[audit_view].port`).
+        #[arg(long)]
+        port: Option<u16>,
+        /// Identity allowed to send entries and to open the page. Repeatable; adds to config.
+        #[arg(long = "allow")]
+        allow: Vec<String>,
+        /// Keep received entries in this file (default: audit-view.jsonl in the state dir).
+        #[arg(long)]
+        store: Option<PathBuf>,
+        /// Keep entries in memory only.
+        #[arg(long, conflicts_with = "store")]
+        no_store: bool,
+        /// Also follow a local audit file, e.g. this machine's own daemon log. Repeatable.
+        #[arg(long)]
+        follow: Vec<PathBuf>,
         /// Bind 127.0.0.1 and skip authentication for loopback. Testing only.
         #[arg(long)]
         dev_loopback: bool,
@@ -212,7 +241,7 @@ async fn run(cli: Cli) -> Result<()> {
     let cfg = config::load()?;
 
     match cli.cmd {
-        Cmd::Serve { bind, port, allow, dev_loopback } => {
+        Cmd::Serve { bind, port, allow, audit_stream, dev_loopback } => {
             config::enforce_permissions()?;
             let desktop: Arc<dyn Desktop> = Arc::new(LocalDesktop::new()?);
             let ts = tailscale::Tailscale::detect();
@@ -221,6 +250,10 @@ async fn run(cli: Cli) -> Result<()> {
                 grants.push(config::parse_allow_flag(a)?);
             }
             let bind = bind.or_else(|| cfg.serve.bind.as_deref().and_then(|s| s.parse().ok()));
+            let mut audit = cfg.serve.audit.clone();
+            if audit_stream.is_some() {
+                audit.stream = audit_stream;
+            }
             server::serve(
                 desktop,
                 ts,
@@ -228,9 +261,43 @@ async fn run(cli: Cli) -> Result<()> {
                     bind,
                     port: port.unwrap_or(cfg.serve.port),
                     grants,
-                    audit: cfg.serve.audit.clone(),
+                    audit,
                     hosts: cfg.serve.hosts.clone(),
                     dev_loopback,
+                },
+            )
+            .await
+        }
+        Cmd::AuditView { bind, port, allow, store, no_store, follow, dev_loopback } => {
+            config::enforce_permissions()?;
+            let ts = tailscale::Tailscale::detect();
+            let v = &cfg.audit_view;
+            let mut grants = v.grants()?;
+            for a in &allow {
+                grants.push(config::parse_allow_flag(a)?);
+            }
+            let bind = bind.or_else(|| v.bind.as_deref().and_then(|s| s.parse().ok()));
+            let store = if no_store {
+                None
+            } else {
+                let mut c = v.store_config();
+                if let Some(p) = store {
+                    c.path = Some(p);
+                }
+                Some(c)
+            };
+            let mut follow = follow;
+            follow.extend(v.follow.iter().cloned());
+            viewer::run(
+                ts,
+                viewer::ViewOpts {
+                    bind,
+                    port: port.unwrap_or(v.port),
+                    grants,
+                    hosts: v.hosts.clone(),
+                    dev_loopback,
+                    store,
+                    follow,
                 },
             )
             .await
@@ -355,7 +422,12 @@ async fn client(cfg: &config::Config, target: &str, cmd: Cmd) -> Result<()> {
             Some(r) => print_json(&r.whoami().await?),
             None => anyhow::bail!("whoami needs a remote --target"),
         },
-        Cmd::Serve { .. } | Cmd::Mcp { .. } | Cmd::Doctor { .. } | Cmd::Service { .. } | Cmd::Audit { .. } => {
+        Cmd::Serve { .. }
+        | Cmd::AuditView { .. }
+        | Cmd::Mcp { .. }
+        | Cmd::Doctor { .. }
+        | Cmd::Service { .. }
+        | Cmd::Audit { .. } => {
             unreachable!()
         }
     }

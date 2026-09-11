@@ -1,6 +1,6 @@
 [package]
 name = "rdc"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 description = "Remote Desktop Control: let an AI agent see and drive another machine's desktop over Tailscale"
 license = "GPL-3.0-or-later"
@@ -12,6 +12,7 @@ async-trait = "0.1"
 axum = { version = "0.8", features = ["json", "query", "macros"] }
 base64 = "0.22"
 bytes = "1"
+futures = { version = "0.3", default-features = false, features = ["std"] }
 clap = { version = "4", features = ["derive", "env"] }
 dirs = "6"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
@@ -51,6 +52,10 @@ windows = { version = "0.62", features = [
     "Win32_UI_HiDpi",
     "Win32_System_Threading",
 ] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
 
 [profile.release]
 lto = "thin"

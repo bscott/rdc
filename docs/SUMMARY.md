@@ -22,6 +22,7 @@
 
 - [MCP tools](mcp.md)
 - [CLI reference](cli.md)
+- [Audit log and live viewer](audit.md)
 - [Troubleshooting](troubleshooting.md)
 
 # Project

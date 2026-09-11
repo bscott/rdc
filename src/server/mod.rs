@@ -1,8 +1,11 @@
 //! The daemon: axum on the Tailscale IP, every request identified via whois.
 
 pub mod audit;
-mod auth;
+pub mod auth;
 mod routes;
+pub mod stream;
+#[cfg(test)]
+mod tests;
 
 use crate::config::{AuditConfig, ResolvedGrant};
 use crate::desktop::Desktop;
@@ -18,6 +21,64 @@ pub struct AppState {
     pub desktop: Arc<dyn Desktop>,
     pub auth: Arc<auth::Auth>,
     pub audit: Arc<audit::Audit>,
+}
+
+impl auth::Gate for AppState {
+    fn auth(&self) -> &auth::Auth {
+        &self.auth
+    }
+    fn record(&self, e: audit::Entry) {
+        self.audit.record(e);
+    }
+}
+
+/// Where a listener goes and which `Host` names it answers to. Shared by `serve` and the audit
+/// viewer so both apply the same rules: Tailscale addresses only, loopback only for testing.
+pub struct Listen {
+    pub addr: SocketAddr,
+    pub hosts: Vec<String>,
+    /// This node's short name, for stamping into audit entries.
+    pub node: String,
+}
+
+pub async fn plan_listen(
+    ts: &Tailscale,
+    bind: Option<IpAddr>,
+    port: u16,
+    dev_loopback: bool,
+    extra_hosts: Vec<String>,
+) -> Result<Listen> {
+    let bind_ip = match bind {
+        Some(ip) => ip,
+        None if dev_loopback => IpAddr::from([127, 0, 0, 1]),
+        None => {
+            let ips = ts.self_ips().await.context("tailscaled unreachable; pass --bind to choose an address")?;
+            *ips.first().context("this node has no Tailscale IP; is tailscaled up?")?
+        }
+    };
+    if dev_loopback && !bind_ip.is_loopback() {
+        anyhow::bail!("--dev-loopback only allows a loopback bind address, not {bind_ip}");
+    }
+    if !dev_loopback && !is_tailscale_ip(bind_ip) {
+        anyhow::bail!(
+            "{bind_ip} is not a Tailscale address; refusing to listen on it (use --dev-loopback for 127.0.0.1)"
+        );
+    }
+    // Names a legitimate client would put in the URL. Anything else in the Host header means the
+    // request was not addressed to us (e.g. a browser lured by DNS rebinding) and is refused.
+    let mut hosts: Vec<String> = vec![bind_ip.to_string()];
+    if let Ok(ips) = ts.self_ips().await {
+        hosts.extend(ips.iter().map(|ip| ip.to_string()));
+    }
+    let names = ts.self_names().await;
+    let node = node_name(&names).unwrap_or_else(|| bind_ip.to_string());
+    hosts.extend(names);
+    hosts.extend(extra_hosts);
+    if dev_loopback {
+        hosts.extend(["localhost".to_string(), "127.0.0.1".to_string(), "::1".to_string()]);
+    }
+    tracing::debug!(?hosts, "accepted Host names");
+    Ok(Listen { addr: SocketAddr::new(bind_ip, port), hosts, node })
 }
 
 pub struct ServeOpts {
@@ -42,51 +103,34 @@ pub async fn serve(desktop: Arc<dyn Desktop>, ts: Tailscale, opts: ServeOpts) ->
             );
         }
     }
-    let bind_ip = match opts.bind {
-        Some(ip) => ip,
-        None if opts.dev_loopback => IpAddr::from([127, 0, 0, 1]),
-        None => {
-            let ips = ts.self_ips().await.context("tailscaled unreachable; pass --bind to choose an address")?;
-            *ips.first().context("this node has no Tailscale IP; is tailscaled up?")?
-        }
-    };
-    if opts.dev_loopback && !bind_ip.is_loopback() {
-        anyhow::bail!("--dev-loopback only allows a loopback bind address, not {bind_ip}");
-    }
-    if !opts.dev_loopback && !is_tailscale_ip(bind_ip) {
-        anyhow::bail!(
-            "{bind_ip} is not a Tailscale address; refusing to expose the desktop on it (use --dev-loopback for 127.0.0.1)"
-        );
-    }
+    let listen = plan_listen(&ts, opts.bind, opts.port, opts.dev_loopback, opts.hosts).await?;
     if opts.grants.is_empty() && !opts.dev_loopback {
         anyhow::bail!("allowlist is empty: set [serve].allow in config or pass --allow; nobody could connect");
     }
     for g in &opts.grants {
         tracing::info!("allow {}", g.describe());
     }
-    let audit = audit::Audit::open(&opts.audit).context("opening the audit log")?;
+    let mut audit = audit::Audit::open(&opts.audit, &listen.node).context("opening the audit log")?;
     match audit.path() {
         Some(p) => tracing::info!("audit log: {}", p.display()),
         None => tracing::warn!("audit log disabled by config"),
     }
-    let addr = SocketAddr::new(bind_ip, opts.port);
-    // Names a legitimate client would put in the URL. Anything else in the Host header means the
-    // request was not addressed to us (e.g. a browser lured by DNS rebinding) and is refused.
-    let mut hosts: Vec<String> = vec![bind_ip.to_string()];
-    if let Ok(ips) = ts.self_ips().await {
-        hosts.extend(ips.iter().map(|ip| ip.to_string()));
+    if let Some(url) = &opts.audit.stream {
+        audit.stream_to(url, opts.audit.stream_token.as_deref()).context("audit stream")?;
+        tracing::info!("audit stream: {url}");
     }
-    hosts.extend(ts.self_names().await);
-    hosts.extend(opts.hosts);
-    if opts.dev_loopback {
-        hosts.extend(["localhost".to_string(), "127.0.0.1".to_string(), "::1".to_string()]);
-    }
-    tracing::debug!(?hosts, "accepted Host names");
-    let auth = auth::Auth::new(ts, Allowlist::new(opts.grants), auth::HostAllow::new(hosts), opts.dev_loopback);
+    let addr = listen.addr;
+    let auth = auth::Auth::new(
+        Arc::new(ts),
+        Allowlist::new(opts.grants),
+        auth::HostAllow::new(listen.hosts),
+        opts.dev_loopback,
+    );
     if opts.dev_loopback {
         tracing::warn!("--dev-loopback: requests from 127.0.0.1 are NOT authenticated");
     }
-    let state = AppState { desktop, auth: Arc::new(auth), audit: Arc::new(audit) };
+    let audit = Arc::new(audit);
+    let state = AppState { desktop, auth: Arc::new(auth), audit: audit.clone() };
     let app = routes::router(state);
     let listener = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("bind {addr}"))?;
     tracing::info!("rdc serving on http://{addr}");
@@ -96,7 +140,17 @@ pub async fn serve(desktop: Arc<dyn Desktop>, ts: Tailscale, opts: ServeOpts) ->
             tracing::info!("shutting down");
         })
         .await?;
+    audit.shutdown().await;
     Ok(())
+}
+
+/// The short name to stamp into audit entries: the first label of the MagicDNS name
+/// (`studio-mac` from `studio-mac.example.ts.net`), which is what people type in `allow` and
+/// in the viewer's filters. Falls back to whatever name tailscaled gave us.
+fn node_name(names: &[String]) -> Option<String> {
+    let first = names.first()?;
+    let label = first.split('.').next().unwrap_or(first);
+    Some(if label.is_empty() { first.clone() } else { label.to_string() })
 }
 
 /// 100.64.0.0/10 (CGNAT range Tailscale uses) or fd7a:115c:a1e0::/48.
@@ -110,5 +164,18 @@ pub fn is_tailscale_ip(ip: IpAddr) -> bool {
             let s = v6.segments();
             s[0] == 0xfd7a && s[1] == 0x115c && s[2] == 0xa1e0
         }
+    }
+}
+
+#[cfg(test)]
+mod node_name_tests {
+    use super::node_name;
+
+    #[test]
+    fn prefers_the_magicdns_label_over_the_hostname() {
+        let names = vec!["brians-m4-mac-mini.example.ts.net".to_string(), "brian’s m4 mac mini".to_string()];
+        assert_eq!(node_name(&names).as_deref(), Some("brians-m4-mac-mini"));
+        assert_eq!(node_name(&["omen".to_string()]).as_deref(), Some("omen"));
+        assert_eq!(node_name(&[]), None);
     }
 }
