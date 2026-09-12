@@ -63,6 +63,7 @@ url = "http://100.64.10.20:7770"
 | `grant` | `[]` | `[[serve.grant]]` blocks, same shape as the table form of `allow` |
 | `audit` | enabled | Audit log settings, see below |
 | `hosts` | `[]` | Extra accepted `Host` header names; the node's own IPs, MagicDNS name and hostname are always accepted |
+| `user` | unset | Unix: account to drop to right after binding, when the daemon was started as root. Without it `rdc serve` refuses to run as root. See [Running as a dedicated user](setup-linux.md#running-as-a-dedicated-user). |
 
 Command-line equivalents: `rdc serve --port 7771 --bind 100.x.y.z --allow a@b --allow tag:ops=view`.
 `--allow` flags are **added** to the config grants; `who=cap,cap` limits capabilities, a bare

@@ -28,9 +28,23 @@ pub struct ServeOpts {
     /// Extra `Host` names to accept besides this node's own addresses and names.
     pub hosts: Vec<String>,
     pub dev_loopback: bool,
+    /// See `crate::privdrop`: who to become after binding, if we are root.
+    pub user: Option<String>,
 }
 
 pub async fn serve(desktop: Arc<dyn Desktop>, ts: Tailscale, opts: ServeOpts) -> Result<()> {
+    // Decide up front so a misconfiguration fails before anything else is set up; the drop
+    // itself happens the moment the listener exists.
+    let drop = crate::privdrop::plan(&crate::privdrop::current(), opts.user.as_deref())?;
+    // Paths that depend on the account are resolved from its passwd entry, not from HOME,
+    // which still describes the invoking user (and must not be mutated in a running runtime).
+    let mut audit_cfg = opts.audit.clone();
+    if let crate::privdrop::Plan::DropTo(acct) = &drop {
+        tracing::warn!("running as root; will drop to {} after binding", acct.name);
+        if audit_cfg.path.is_none() {
+            audit_cfg.path = Some(acct.state_dir().join("audit.jsonl"));
+        }
+    }
     // On macOS this pops the Screen Recording / Accessibility prompts on the console the first
     // time; screenshots show only the wallpaper until the user grants and we are restarted.
     for (name, granted) in crate::permissions::request() {
@@ -64,11 +78,6 @@ pub async fn serve(desktop: Arc<dyn Desktop>, ts: Tailscale, opts: ServeOpts) ->
     for g in &opts.grants {
         tracing::info!("allow {}", g.describe());
     }
-    let audit = audit::Audit::open(&opts.audit).context("opening the audit log")?;
-    match audit.path() {
-        Some(p) => tracing::info!("audit log: {}", p.display()),
-        None => tracing::warn!("audit log disabled by config"),
-    }
     let addr = SocketAddr::new(bind_ip, opts.port);
     // Names a legitimate client would put in the URL. Anything else in the Host header means the
     // request was not addressed to us (e.g. a browser lured by DNS rebinding) and is refused.
@@ -86,9 +95,23 @@ pub async fn serve(desktop: Arc<dyn Desktop>, ts: Tailscale, opts: ServeOpts) ->
     if opts.dev_loopback {
         tracing::warn!("--dev-loopback: requests from 127.0.0.1 are NOT authenticated");
     }
+    let listener = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("bind {addr}"))?;
+    // Bound. Nothing after this line needs root, so shed it before the first request and
+    // before any file (the audit log) is created with the wrong owner.
+    crate::privdrop::apply(&drop).context("dropping privileges")?;
+    let audit = audit::Audit::open(&audit_cfg).with_context(|| {
+        format!(
+            "opening the audit log at {} (after a privilege drop, the target account needs a writable home or an \
+             explicit [serve.audit].path)",
+            audit_cfg.resolved_path().display()
+        )
+    })?;
+    match audit.path() {
+        Some(p) => tracing::info!("audit log: {}", p.display()),
+        None => tracing::warn!("audit log disabled by config"),
+    }
     let state = AppState { desktop, auth: Arc::new(auth), audit: Arc::new(audit) };
     let app = routes::router(state);
-    let listener = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("bind {addr}"))?;
     tracing::info!("rdc serving on http://{addr}");
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
         .with_graceful_shutdown(async {

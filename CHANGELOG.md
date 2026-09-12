@@ -5,6 +5,17 @@ builds the GitHub release body from the matching `## <version>` section.
 
 ## Unreleased
 
+### Added
+- **`rdc serve` refuses to run as root.** It never needs root and a remote-control surface
+  should not hold it; started as root it exits with a message. `rdc doctor` reports the process
+  user. Unix only.
+- **`[serve].user` / `--user`: drop privileges after bind.** When rdc is started as root with a
+  target account configured, it binds the port, switches user (`initgroups`/`setgid`/`setuid`,
+  verified irreversible) and only then opens the audit log, in that account's state directory,
+  and serves. The environment is not modified. Unix only; a separate account can only see the
+  desktop on X11, which the Linux setup guide explains, and that path is untested on real
+  hardware.
+
 ### Fixed
 - Audit completeness that 0.3.0's notes claimed but did not ship: `whoami`, `/health`, unknown
   routes, malformed action bodies and screenshot parameter errors are now written to the audit

@@ -17,6 +17,17 @@ fn line(ok: Option<bool>, what: &str, detail: impl AsRef<str>) {
 pub async fn run(request_permissions: bool) -> anyhow::Result<bool> {
     let mut healthy = true;
     line(None, "platform", format!("{} {}", std::env::consts::OS, std::env::consts::ARCH));
+    let me = crate::privdrop::current();
+    if me.is_root() {
+        healthy = false;
+        line(
+            Some(false),
+            "process user",
+            "root — `rdc serve` refuses to run as root; run it as the desktop user or set [serve].user to drop to",
+        );
+    } else {
+        line(Some(true), "process user", format!("{} (uid {})", me.name, me.uid));
+    }
     let perms = if request_permissions { crate::permissions::request() } else { crate::permissions::check() };
     for (name, granted) in perms {
         if !granted {

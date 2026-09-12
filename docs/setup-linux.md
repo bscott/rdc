@@ -56,6 +56,46 @@ restarts on failure. It runs the binary from the path where you invoked `service
 
 Config lives at `~/.config/rdc/config.toml`; see [Configuration](configuration.md).
 
+## Running as a dedicated user
+
+`rdc serve` refuses to run as root. If you want to start it from a root context anyway (a system
+unit, a provisioning script), `[serve].user` (or `--user`) names an account to become. The
+daemon binds the listener, switches to that account with `initgroups`/`setgid`/`setuid`, checks
+that regaining root is impossible, and only then opens the audit log and accepts the first
+request. A failed drop is fatal; the daemon never falls back to serving as root. The process
+environment is not modified: the audit log goes to that account's state directory
+(`~account/.local/state/rdc`, or `~account/Library/Application Support/rdc` on macOS) unless
+`[serve.audit].path` says otherwise, and the account needs a writable home for that.
+
+Whether that account can *see* anything depends on the display server:
+
+| Session | Can a separate account capture and drive it? |
+|---|---|
+| X11 | Yes, given `DISPLAY` and an `XAUTHORITY` file it may read (or `xhost +SI:localuser:rdc`). This is the setup where a dedicated `rdc` user is meaningful. |
+| Wayland | No. The compositor's socket in `$XDG_RUNTIME_DIR` belongs to the logged-in user and the portal talks only to that session. Run rdc as the desktop user; the root refusal still protects you. |
+| macOS | No (see [macOS setup](setup-macos.md)). Same advice as Wayland. |
+
+Minimal X11 example:
+
+```sh
+sudo useradd --system --create-home --shell /usr/sbin/nologin rdc
+sudo install -o rdc -g rdc -m 700 -d /home/rdc/.config/rdc
+printf '[serve]\nallow = ["you@example.com"]\nuser = "rdc"\n' \
+  | sudo install -o rdc -g rdc -m 600 /dev/stdin /home/rdc/.config/rdc/config.toml
+# From the desktop session, let that account reach the X server:
+xhost +SI:localuser:rdc
+# Then, from a root shell or system unit with DISPLAY and XAUTHORITY set:
+sudo -E rdc serve --user rdc
+```
+
+This path has not yet been exercised on a real X11 desktop; please report what you find.
+
+## Persistence is opt-in
+
+Nothing rdc does installs itself anywhere. `rdc serve` runs until you stop it and leaves no unit,
+LaunchAgent, scheduled task or login item behind. Only `rdc service install`, run explicitly,
+creates the per-user service, and `rdc service uninstall` removes it completely.
+
 ## Tailscale
 
 rdc uses the LocalAPI socket at `/var/run/tailscale/tailscaled.sock`. If your user can't read it,

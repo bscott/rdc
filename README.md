@@ -75,10 +75,11 @@ config above, with the controlled machine tagged `tag:rdc-host` and the monitor 
 ```
 
 The [configuration guide](docs/configuration.md#the-tailscale-side-let-the-traffic-through) maps
-every grant example to its policy rule, in both `grants` and legacy `acls` syntax. `rdc doctor` tells you if a permission or `tailscaled` is missing. When it works, install it as a
-background service so it survives reboots: `rdc service install` (macOS LaunchAgent or Linux
-systemd user service). The service reads the same config file, which is why the allowlist goes
-there rather than on the command line. macOS needs two one-time permission grants; follow
+every grant example to its policy rule, in both `grants` and legacy `acls` syntax. `rdc doctor`
+tells you if a permission or `tailscaled` is missing. `rdc serve` runs in the foreground and
+installs nothing. If you want it to survive reboots, opt in explicitly with `rdc service install`
+(macOS LaunchAgent, Linux systemd user service, Windows logon task). The service reads the same
+config file, which is why the allowlist goes there rather than on the command line. macOS needs two one-time permission grants; follow
 [docs/setup-macos.md](docs/setup-macos.md).
 
 **3. On your laptop**, talk to it by Tailscale hostname:
