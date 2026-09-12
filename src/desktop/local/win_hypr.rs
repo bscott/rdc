@@ -95,6 +95,29 @@ impl Hyprland {
         Ok(out)
     }
 
+    /// `hyprctl activewindow` returns just the focused client (or an empty object when nothing
+    /// is focused), so this avoids serialising the whole client list per action.
+    pub fn focused_window(&self) -> Result<Option<Window>> {
+        let raw = self.run(&["-j", "activewindow"])?;
+        if raw.trim().is_empty() || raw.trim() == "{}" {
+            return Ok(None);
+        }
+        let c: HClient =
+            serde_json::from_str(&raw).map_err(|e| RdcError::Backend(format!("hyprctl activewindow json: {e}")))?;
+        if !c.mapped {
+            return Ok(None);
+        }
+        Ok(Some(Window {
+            id: u64::from_str_radix(c.address.trim_start_matches("0x"), 16).unwrap_or(0),
+            pid: c.pid.max(0) as u32,
+            app: c.class,
+            title: c.title,
+            rect: Rect { x: c.at.0, y: c.at.1, w: c.size.0.max(0) as u32, h: c.size.1.max(0) as u32 },
+            focused: true,
+            minimized: c.hidden,
+        }))
+    }
+
     pub fn focus(&self, w: &Window) -> Result<()> {
         self.run(&["dispatch", "focuswindow", &format!("address:0x{:x}", w.id)]).map(|_| ())
     }

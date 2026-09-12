@@ -41,8 +41,11 @@ TLS: the tailnet's WireGuard layer provides encryption and the identity.
   signed bundle you built or verified; see `scripts/macos`.
 
 **Audit.** Every request and rejection is appended to a JSON-lines audit log (mode 0600, size
-rotated) with the caller's identity, an action summary, the outcome and timing. Typed text is
-never logged, only its length. Read it with `rdc audit`.
+rotated) with a timestamp, the caller's identity, an action summary, the focused window's
+`app: title` at the moment of the request, the outcome and timing, and for screenshots the
+SHA-256 of the returned image. Typed text is never logged, only its length. Window titles can be
+switched off (`[serve.audit].window_titles = false`) where they would leak more than they
+explain. Read it with `rdc audit`.
 
 **Not yet implemented** (tracked as issues): rate limiting, and a pause when a human is
 physically using the input devices.

@@ -208,13 +208,39 @@ Every authorized request and every rejection is appended as one JSON object per 
 {"ts":"2026-09-09T16:08:55.979Z","peer":"100.64.0.7","login":"alice@example.com","node":"laptop",
  "method":"POST","path":"/v1/act","action":"input.click 100,100 Left x1","outcome":"denied",
  "status":403,"detail":"alice@example.com may not use `input` on this machine","ms":0}
+{"ts":"2026-09-09T16:09:02.114Z","peer":"100.64.0.7","login":"alice@example.com","node":"laptop",
+ "method":"GET","path":"/v1/screenshot","action":"screenshot all png max=Some(1568)","outcome":"ok",
+ "status":200,"ms":312,"window":"Firefox: Inbox — Mail","screenshot_sha256":"9f86d081…"}
 ```
 
 `outcome` is `ok`, `denied` (host, identity or capability) or `error`. `action` describes the
 request without its payload: typed text is recorded only as a character count. Key chords, window
-selectors and error messages are recorded as sent, with control characters replaced, so a hostile
-value cannot break the file or the terminal you read it in. The file and its rotated copies are
-mode 0600. Read it with `rdc audit` (`-n`, `--json`, `--path`).
+selectors, window titles and error messages are recorded as sent, with control characters
+replaced, so a hostile value cannot break the file or the terminal you read it in. Two fields tie
+each line to what was actually on screen:
+
+- `window` is the focused window when the request arrived (`app: title`, truncated to 160
+  characters), recorded for screenshot, input, focus and clipboard requests. It answers "what
+  was that click aimed at?" after the fact. The lookup is a direct focused-window query
+  (`GetForegroundWindow` on Windows, `hyprctl activewindow` on Hyprland, the on-screen window
+  list on macOS/X11), not a full enumeration; `rdc doctor` prints how long it takes on your
+  machine. Titles can carry document names, URLs and mail subjects; set `window_titles = false`
+  to leave it out.
+- `screenshot_sha256` is the SHA-256 of the image bytes a screenshot request returned, so a
+  screenshot an agent saved (or that appears in a transcript) can be matched to the exact audit
+  line that produced it. Every MCP action ends with a fresh screenshot, so every tool call an
+  agent makes leaves at least one hashed line.
+
+The file and its rotated copies are mode 0600. Read it with `rdc audit` (`-n`, `--json`,
+`--path`); the table view shows the window in brackets and the first 12 hex digits of the hash.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | write the log at all |
+| `path` | platform state dir | where to write it |
+| `max_size_mb` | `50` | rotate above this size |
+| `keep` | `5` | rotated files to keep |
+| `window_titles` | `true` | record the focused window on each action |
 
 Default location: `~/.local/state/rdc/audit.jsonl` (Linux), `~/Library/Application
 Support/rdc/audit.jsonl` (macOS), `%LOCALAPPDATA%\rdc\audit.jsonl` (Windows).

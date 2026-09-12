@@ -17,32 +17,50 @@ fn status_of(e: &RdcError) -> u16 {
     auth::error_response(e).status().as_u16()
 }
 
-/// Run a capability-gated handler body and write the audit line for it.
+/// What a handler is doing, for the audit line.
+struct Call<'a> {
+    method: &'a str,
+    path: &'a str,
+    cap: Capability,
+    action: Option<String>,
+    /// Record the focused window *before* the body runs, i.e. the context the action was aimed
+    /// at rather than whatever it left behind.
+    with_window: bool,
+}
+
+/// Run a capability-gated handler body and write the audit line for it. `finish` gets the
+/// successful result so a handler can attach result-derived facts (the screenshot hash).
 async fn audited<T, F>(
     s: &AppState,
     id: &Identity,
-    method: &str,
-    path: &str,
-    cap: Capability,
-    action: Option<String>,
+    call: Call<'_>,
     f: F,
+    finish: impl FnOnce(&T, Entry) -> Entry,
 ) -> Result<T>
 where
     F: std::future::Future<Output = Result<T>>,
 {
     let started = Instant::now();
-    let mut entry = Entry::new(&id.ip, Some(id), method, path);
-    if let Some(a) = action {
+    let mut entry = Entry::new(&id.ip, Some(id), call.method, call.path);
+    if let Some(a) = call.action {
         entry = entry.action(a);
     }
-    if let Err(e) = auth::require(id, cap) {
+    if let Err(e) = auth::require(id, call.cap) {
         tracing::warn!(who = id.label(), error = %e, "forbidden");
         s.audit.record(entry.denied(status_of(&e), e.message()).took(started));
         return Err(e);
     }
+    if call.with_window && s.audit.wants_window_titles() {
+        // Best effort: a failed lookup must never block or fail the request. This is the
+        // platform's direct focused-window query, not a full enumeration; see Desktop.
+        let t0 = Instant::now();
+        let w = s.desktop.focused_window().await.ok().flatten();
+        tracing::debug!(us = t0.elapsed().as_micros(), found = w.is_some(), "audit focused-window lookup");
+        entry = entry.window(w.as_ref().map(super::audit::describe_window));
+    }
     let r = f.await;
     match &r {
-        Ok(_) => s.audit.record(entry.took(started)),
+        Ok(v) => s.audit.record(finish(v, entry).took(started)),
         Err(e) => s.audit.record(entry.error(status_of(e), e.message()).took(started)),
     }
     r
@@ -73,7 +91,8 @@ impl<T: serde::Serialize> IntoResponse for Api<T> {
 }
 
 async fn state_h(State(s): State<AppState>, Extension(id): Extension<Identity>) -> Api<crate::proto::State> {
-    Api(audited(&s, &id, "GET", "/v1/state", Capability::View, None, s.desktop.state()).await)
+    let call = Call { method: "GET", path: "/v1/state", cap: Capability::View, action: None, with_window: false };
+    Api(audited(&s, &id, call, s.desktop.state(), |_, e| e).await)
 }
 
 #[derive(Deserialize)]
@@ -117,7 +136,9 @@ async fn screenshot_h(
     };
     let req = ScreenshotReq { display, format, max_long_edge: q.max };
     let action = format!("screenshot {display} {} max={:?}", format.ext(), q.max);
-    match audited(&s, &id, "GET", "/v1/screenshot", Capability::View, Some(action), s.desktop.screenshot(req)).await {
+    let call =
+        Call { method: "GET", path: "/v1/screenshot", cap: Capability::View, action: Some(action), with_window: true };
+    match audited(&s, &id, call, s.desktop.screenshot(req), |shot, e| e.screenshot_hash(&shot.data)).await {
         Ok(shot) => {
             let mut h = HeaderMap::new();
             h.insert(header::CONTENT_TYPE, HeaderValue::from_static(shot.format.mime()));
@@ -152,23 +173,21 @@ async fn act_h(
         Action::ClipboardSet { .. } => Capability::Clipboard,
     };
     let desc = a.describe();
-    Api(audited(&s, &id, "POST", "/v1/act", cap, Some(desc), s.desktop.act(a))
-        .await
-        .map(|_| serde_json::json!({ "ok": true })))
+    let call = Call { method: "POST", path: "/v1/act", cap, action: Some(desc), with_window: true };
+    Api(audited(&s, &id, call, s.desktop.act(a), |_, e| e).await.map(|_| serde_json::json!({ "ok": true })))
 }
 
 async fn clipboard_h(State(s): State<AppState>, Extension(id): Extension<Identity>) -> Api<serde_json::Value> {
-    Api(audited(
-        &s,
-        &id,
-        "GET",
-        "/v1/clipboard",
-        Capability::Clipboard,
-        Some("clipboard.get".into()),
-        s.desktop.clipboard_get(),
-    )
-    .await
-    .map(|text| serde_json::json!({ "text": text })))
+    let call = Call {
+        method: "GET",
+        path: "/v1/clipboard",
+        cap: Capability::Clipboard,
+        action: Some("clipboard.get".into()),
+        with_window: true,
+    };
+    Api(audited(&s, &id, call, s.desktop.clipboard_get(), |_, e| e)
+        .await
+        .map(|text| serde_json::json!({ "text": text })))
 }
 
 async fn whoami_h(State(s): State<AppState>, Extension(id): Extension<Identity>) -> Json<Identity> {

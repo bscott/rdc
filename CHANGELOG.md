@@ -5,6 +5,16 @@ builds the GitHub release body from the matching `## <version>` section.
 
 ## Unreleased
 
+### Added
+- **Audit lines record the focused window and the screenshot hash.** Screenshot, input, focus
+  and clipboard requests now log `window` (`app: title` of the focused window when the request
+  arrived, sanitised like every other field) and screenshot requests log `screenshot_sha256` of
+  the returned bytes, so an action can be tied to what was on screen and a saved image to the
+  line that produced it. The lookup uses a dedicated focused-window query (`GetForegroundWindow`
+  on Windows, `hyprctl activewindow` on Hyprland) rather than a full enumeration; `rdc doctor`
+  reports how long it takes. `[serve.audit].window_titles = false` omits the title. `rdc audit`
+  shows both.
+
 ### Fixed
 - Audit completeness that 0.3.0's notes claimed but did not ship: `whoami`, `/health`, unknown
   routes, malformed action bodies and screenshot parameter errors are now written to the audit

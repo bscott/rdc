@@ -84,6 +84,22 @@ impl Desktop for LocalDesktop {
             .map_err(|e| RdcError::Backend(format!("window task failed: {e}")))?
     }
 
+    async fn focused_window(&self) -> Result<Option<Window>> {
+        #[cfg(target_os = "linux")]
+        if let Some(h) = &self.hypr {
+            return h.focused_window();
+        }
+        #[cfg(target_os = "windows")]
+        {
+            return tokio::task::spawn_blocking(win_windows::focused_window)
+                .await
+                .map_err(|e| RdcError::Backend(format!("focused-window task failed: {e}")))?;
+        }
+        // macOS and X11: xcap's list is already a single on-screen-windows query; filter it.
+        #[allow(unreachable_code)]
+        Ok(self.windows().await?.into_iter().find(|w| w.focused))
+    }
+
     async fn focus(&self, target: WindowTarget) -> Result<()> {
         let windows = self.windows().await?;
         let w = find_window(&windows, &target)

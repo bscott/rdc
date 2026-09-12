@@ -143,6 +143,19 @@ pub async fn run(request_permissions: bool) -> anyhow::Result<bool> {
             );
         }
     }
+    let t0 = std::time::Instant::now();
+    match desk.focused_window().await {
+        Ok(w) => line(
+            None,
+            "focused window",
+            format!(
+                "{} in {:?} (looked up before every audited action; `[serve.audit].window_titles = false` to skip)",
+                w.map(|w| crate::server::audit::describe_window(&w)).unwrap_or_else(|| "none".into()),
+                t0.elapsed()
+            ),
+        ),
+        Err(e) => line(None, "focused window", format!("{e}")),
+    }
     match desk.windows().await {
         Ok(ws) => line(
             Some(true),
