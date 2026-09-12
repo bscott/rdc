@@ -5,6 +5,11 @@ builds the GitHub release body from the matching `## <version>` section.
 
 ## Unreleased
 
+### Added
+- **`rdc serve` refuses to run as root.** It never needs root and a remote-control surface
+  should not hold it; started as root it exits with a message. `rdc doctor` reports the process
+  user. Unix only.
+
 ### Fixed
 - Audit completeness that 0.3.0's notes claimed but did not ship: `whoami`, `/health`, unknown
   routes, malformed action bodies and screenshot parameter errors are now written to the audit
