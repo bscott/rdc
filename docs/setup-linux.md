@@ -56,6 +56,34 @@ restarts on failure. It runs the binary from the path where you invoked `service
 
 Config lives at `~/.config/rdc/config.toml`; see [Configuration](configuration.md).
 
+### What the unit is allowed to do
+
+`rdc service install` writes a sandboxed unit. The daemon runs as your user inside your session
+(it has to, to see the screen and inject input) but systemd fences off everything it does not
+need:
+
+| Restriction | Effect |
+|---|---|
+| `NoNewPrivileges`, empty `CapabilityBoundingSet`, `RestrictSUIDSGID` | neither rdc nor anything it runs (`hyprctl`, `tailscale`) can gain privileges |
+| `SystemCallFilter=@system-service` minus `@privileged @resources`, native ABI only | privileged and resource-limit syscalls return `EPERM` |
+| `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6` | unix sockets (Wayland, D-Bus, portal, tailscaled) and the HTTP listener; nothing else |
+| `ProtectKernel*`, `ProtectControlGroups`, `ProtectClock`, `ProtectHostname` | no kernel tunables, modules, logs, cgroups, clock or hostname |
+| `UMask=0077` | audit log and rotations are private to your user |
+| `ProtectSystem=strict`, `ProtectHome=read-only`, `PrivateTmp` (drop-in) | the filesystem is read-only except `$XDG_RUNTIME_DIR`, `~/.local/state/rdc` and the audit log directory |
+
+`RemoveIPC` is deliberately left out: in a `--user` unit it would delete every shared-memory
+object owned by your account when the unit stops, which can take Xwayland (MIT-SHM) and PipeWire
+down with it.
+
+The filesystem rules live in a separate drop-in, `~/.config/systemd/user/dev.rdc.daemon.service.d/10-sandbox-mounts.conf`,
+because in a `--user` service they need unprivileged user namespaces. The installer checks the
+kernel knobs and skips the drop-in when they are disabled; everything else still applies.
+
+Check the result with `systemd-analyze security --user dev.rdc.daemon`. If your desktop needs
+something the sandbox blocks (the journal will show `EPERM` or a mount error), loosen it with
+`systemctl --user edit dev.rdc.daemon` rather than editing the generated files, so the override
+survives the next `service install`.
+
 ## Tailscale
 
 rdc uses the LocalAPI socket at `/var/run/tailscale/tailscaled.sock`. If your user can't read it,
