@@ -4,6 +4,7 @@ mod doctor;
 mod keys;
 mod mcp;
 mod permissions;
+mod privdrop;
 mod proto;
 mod server;
 mod service;
@@ -56,6 +57,10 @@ enum Cmd {
         /// Bind 127.0.0.1 and skip authentication for loopback. Testing only.
         #[arg(long)]
         dev_loopback: bool,
+        /// Unix: if started with root privileges, drop to this account right after binding the
+        /// port (default `[serve].user`). rdc refuses to serve as root without it.
+        #[arg(long)]
+        user: Option<String>,
     },
     /// Collect audit entries streamed from `rdc serve` instances and show them live in a browser.
     AuditView {
@@ -239,9 +244,14 @@ async fn run(cli: Cli) -> Result<()> {
     #[cfg(target_os = "windows")]
     desktop::local::set_dpi_aware();
     let cfg = config::load()?;
+    let log_file = cli.log_file.clone();
 
     match cli.cmd {
-        Cmd::Serve { bind, port, allow, audit_stream, dev_loopback } => {
+        Cmd::Serve { bind, port, allow, audit_stream, dev_loopback, user } => {
+            let user = user.or_else(|| cfg.serve.user.clone());
+            if user.is_none() {
+                privdrop::refuse_root()?;
+            }
             config::enforce_permissions()?;
             let desktop: Arc<dyn Desktop> = Arc::new(LocalDesktop::new()?);
             let ts = tailscale::Tailscale::detect();
@@ -264,6 +274,8 @@ async fn run(cli: Cli) -> Result<()> {
                     audit,
                     hosts: cfg.serve.hosts.clone(),
                     dev_loopback,
+                    user,
+                    log_file: log_file.clone(),
                 },
             )
             .await

@@ -89,9 +89,31 @@ pub struct ServeOpts {
     /// Extra `Host` names to accept besides this node's own addresses and names.
     pub hosts: Vec<String>,
     pub dev_loopback: bool,
+    /// See [`crate::privdrop`]: the account to become after binding, if we have root privileges.
+    pub user: Option<String>,
+    /// `--log-file`, if any. Opened before the drop, so its ownership has to be handed over.
+    pub log_file: Option<std::path::PathBuf>,
 }
 
 pub async fn serve(desktop: Arc<dyn Desktop>, ts: Tailscale, opts: ServeOpts) -> Result<()> {
+    // Decide before anything else is set up, so a misconfiguration fails immediately; the drop
+    // itself happens the moment the listener exists.
+    let drop = crate::privdrop::plan(&crate::privdrop::current(), opts.user.as_deref())?;
+    // Account-specific paths come from the passwd entry, not from HOME, which still describes
+    // whoever invoked us (and must not be rewritten in a running async process).
+    let mut audit_cfg = opts.audit.clone();
+    if let crate::privdrop::Plan::DropTo(acct) = &drop {
+        tracing::warn!("started with root privileges; will drop to {} after binding", acct.name);
+        if audit_cfg.path.is_none() {
+            if acct.home.as_os_str().is_empty() {
+                anyhow::bail!(
+                    "{} has no home directory, so there is nowhere to put the audit log after dropping to it;                      set [serve.audit].path to a directory that account can write",
+                    acct.name
+                );
+            }
+            audit_cfg.path = Some(acct.state_dir().join("audit.jsonl"));
+        }
+    }
     // On macOS this pops the Screen Recording / Accessibility prompts on the console the first
     // time; screenshots show only the wallpaper until the user grants and we are restarted.
     for (name, granted) in crate::permissions::request() {
@@ -110,15 +132,6 @@ pub async fn serve(desktop: Arc<dyn Desktop>, ts: Tailscale, opts: ServeOpts) ->
     for g in &opts.grants {
         tracing::info!("allow {}", g.describe());
     }
-    let mut audit = audit::Audit::open(&opts.audit, &listen.node).context("opening the audit log")?;
-    match audit.path() {
-        Some(p) => tracing::info!("audit log: {}", p.display()),
-        None => tracing::warn!("audit log disabled by config"),
-    }
-    if let Some(url) = &opts.audit.stream {
-        audit.stream_to(url, opts.audit.stream_token.as_deref()).context("audit stream")?;
-        tracing::info!("audit stream: {url}");
-    }
     let addr = listen.addr;
     let auth = auth::Auth::new(
         Arc::new(ts),
@@ -129,10 +142,34 @@ pub async fn serve(desktop: Arc<dyn Desktop>, ts: Tailscale, opts: ServeOpts) ->
     if opts.dev_loopback {
         tracing::warn!("--dev-loopback: requests from 127.0.0.1 are NOT authenticated");
     }
+    let listener = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("bind {addr}"))?;
+
+    // Bound. Nothing from here on needs root, so shed it before the first request and before
+    // any file is created with the wrong owner.
+    if let crate::privdrop::Plan::DropTo(acct) = &drop
+        && let Some(log) = &opts.log_file
+    {
+        // The open descriptor survives the drop, but the file on disk would stay root-owned,
+        // which breaks rotation and any later run as that account.
+        if let Err(e) = crate::privdrop::chown_to(log, acct) {
+            tracing::warn!("could not give {} to {}: {e}", log.display(), acct.name);
+        }
+    }
+    crate::privdrop::apply(&drop).context("dropping privileges")?;
+
+    let mut audit = audit::Audit::open(&audit_cfg, &listen.node)
+        .with_context(|| format!("opening the audit log at {}", audit_cfg.resolved_path().display()))?;
+    match audit.path() {
+        Some(p) => tracing::info!("audit log: {}", p.display()),
+        None => tracing::warn!("audit log disabled by config"),
+    }
+    if let Some(url) = &audit_cfg.stream {
+        audit.stream_to(url, audit_cfg.stream_token.as_deref()).context("audit stream")?;
+        tracing::info!("audit stream: {url}");
+    }
     let audit = Arc::new(audit);
     let state = AppState { desktop, auth: Arc::new(auth), audit: audit.clone() };
     let app = routes::router(state);
-    let listener = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("bind {addr}"))?;
     tracing::info!("rdc serving on http://{addr}");
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
         .with_graceful_shutdown(async {
