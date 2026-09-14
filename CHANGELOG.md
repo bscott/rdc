@@ -5,6 +5,17 @@ builds the GitHub release body from the matching `## <version>` section.
 
 ## Unreleased
 
+### Added
+- **The systemd `--user` unit is sandboxed.** `rdc service install` writes `NoNewPrivileges`,
+  a `@system-service` syscall filter minus `@privileged`/`@resources`, `RestrictAddressFamilies`,
+  `RestrictNamespaces`/`RestrictRealtime`/`RestrictSUIDSGID`/`LockPersonality` and `UMask=0077`
+  into the unit, and the directives that need user namespaces (`PrivateUsers`, an empty
+  capability set, the `Protect*` family, `ProtectSystem=strict`, `ProtectHome=read-only`,
+  `PrivateTmp` with the X11 socket bound back) into a drop-in written only when a real
+  `unshare -Ur` probe succeeds, since those would otherwise stop the unit from starting at all.
+  Install reports a skipped sandbox, removes a stale drop-in, and waits for the unit to reach
+  `active` so a restart loop is not mistaken for success.
+
 ## 0.4.0 — 2026-09-11
 
 ### Added

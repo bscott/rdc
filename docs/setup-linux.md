@@ -56,6 +56,53 @@ restarts on failure. It runs the binary from the path where you invoked `service
 
 Config lives at `~/.config/rdc/config.toml`; see [Configuration](configuration.md).
 
+### What the unit is allowed to do
+
+`rdc service install` writes a sandboxed unit. The daemon runs as your user inside your session
+(it has to, to see the screen and inject input), but systemd fences off everything it does not
+need. The directives are split across two files because in a `--user` service they are not all
+equally available:
+
+**Always applied**, in `dev.rdc.daemon.service` — these are pure seccomp and prctl settings and
+need no namespace:
+
+| Restriction | Effect |
+|---|---|
+| `NoNewPrivileges`, `RestrictSUIDSGID` | neither rdc nor anything it runs (`hyprctl`, `tailscale`) can gain privileges |
+| `SystemCallFilter=@system-service` minus `@privileged @resources`, native ABI only | privileged and resource-limit syscalls return `EPERM` |
+| `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6` | unix sockets (Wayland, D-Bus, portal, tailscaled) and the HTTP listener; nothing else |
+| `RestrictNamespaces`, `RestrictRealtime`, `LockPersonality` | no new namespaces, no realtime scheduling, no personality changes |
+| `UMask=0077` | audit log and rotated copies are private to your user |
+
+**Applied when unprivileged user namespaces work**, in
+`dev.rdc.daemon.service.d/10-sandbox.conf`:
+
+| Restriction | Effect |
+|---|---|
+| `PrivateUsers=yes` | every uid but yours maps to `nobody` inside the service |
+| empty `CapabilityBoundingSet`/`AmbientCapabilities` | rdc can never hold a capability |
+| `ProtectKernelTunables`, `ProtectKernelModules`, `ProtectKernelLogs`, `ProtectControlGroups`, `ProtectClock`, `ProtectHostname` | no kernel tunables, modules, logs, cgroups, clock or hostname |
+| `ProtectSystem=strict`, `ProtectHome=read-only`, `PrivateTmp` | the filesystem is read-only except `$XDG_RUNTIME_DIR`, `~/.local/state/rdc` and the audit log directory |
+| `BindReadOnlyPaths=-/tmp/.X11-unix` | puts the X11 socket back, which `PrivateTmp` would otherwise hide |
+
+Every directive in the second table implies `PrivateUsers=` in a `--user` service (see
+`systemd.exec(5)`), so on a kernel that forbids unprivileged user namespaces the unit would
+refuse to start entirely. `rdc service install` therefore *probes* — it runs `unshare -Ur true`
+rather than trusting `/proc/sys` knobs, because Ubuntu 23.10+ restricts namespaces through an
+AppArmor profile the old knobs do not reflect — and writes the drop-in only if that succeeds.
+It says so when it skips it, and removes a stale drop-in if a kernel upgrade takes namespaces
+away. After starting the unit it waits for `systemctl --user is-active` to settle, so a daemon
+stuck in a restart loop is reported rather than silently retried.
+
+`RemoveIPC` is deliberately not set: in a `--user` unit it would delete every shared-memory
+object owned by your account when the unit stops, which can take Xwayland (MIT-SHM) and
+PipeWire down with it.
+
+Check the result with `systemd-analyze security --user dev.rdc.daemon`. If your desktop needs
+something the sandbox blocks (the journal will show `EPERM` or a mount error), override it with
+`systemctl --user edit dev.rdc.daemon` rather than editing the generated files, so the change
+survives the next `rdc service install`.
+
 ## Tailscale
 
 rdc uses the LocalAPI socket at `/var/run/tailscale/tailscaled.sock`. If your user can't read it,
