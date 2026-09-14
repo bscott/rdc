@@ -4,6 +4,7 @@ mod doctor;
 mod keys;
 mod mcp;
 mod permissions;
+mod privdrop;
 mod proto;
 mod server;
 mod service;
@@ -242,6 +243,7 @@ async fn run(cli: Cli) -> Result<()> {
 
     match cli.cmd {
         Cmd::Serve { bind, port, allow, audit_stream, dev_loopback } => {
+            privdrop::refuse_root()?;
             config::enforce_permissions()?;
             let desktop: Arc<dyn Desktop> = Arc::new(LocalDesktop::new()?);
             let ts = tailscale::Tailscale::detect();

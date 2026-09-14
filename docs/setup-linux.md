@@ -56,6 +56,12 @@ restarts on failure. It runs the binary from the path where you invoked `service
 
 Config lives at `~/.config/rdc/config.toml`; see [Configuration](configuration.md).
 
+## Persistence is opt-in
+
+Nothing rdc does installs itself anywhere. `rdc serve` runs until you stop it and leaves no unit,
+LaunchAgent, scheduled task or login item behind. Only `rdc service install`, run explicitly,
+creates the per-user service, and `rdc service uninstall` removes it completely.
+
 ## Tailscale
 
 rdc uses the LocalAPI socket at `/var/run/tailscale/tailscaled.sock`. If your user can't read it,

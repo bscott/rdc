@@ -5,6 +5,11 @@ builds the GitHub release body from the matching `## <version>` section.
 
 ## Unreleased
 
+### Added
+- **`rdc serve` refuses to run with root privileges.** It never needs them and a remote-control
+  surface should not hold them; started with a real or effective uid of 0 it exits with a
+  message. `rdc doctor` reports the process user. Unix only.
+
 ## 0.4.0 — 2026-09-11
 
 ### Added
