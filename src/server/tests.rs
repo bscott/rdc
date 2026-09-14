@@ -1,7 +1,7 @@
 //! Router-level tests: the real axum stack with a fake desktop and a fake identity table.
 //! These cover the security gate end to end without a network, a display or tailscaled.
 
-use super::audit::{Audit, Entry, tail};
+use super::audit::{Audit, Entry, sha256_hex, tail};
 use super::auth::{Allowlist, Auth, HostAllow, Identify};
 use super::{AppState, routes};
 use crate::config::{AuditConfig, ResolvedGrant};
@@ -21,10 +21,27 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tower::ServiceExt;
 
-/// Records what the daemon was asked to do.
+/// Records what the daemon was asked to do, and reports whatever windows a test installs.
 #[derive(Default)]
 struct FakeDesktop {
     actions: Mutex<Vec<String>>,
+    windows: Mutex<Vec<Window>>,
+}
+
+impl FakeDesktop {
+    /// Stand in for an application with a hostile name: control characters that would rewrite
+    /// the audit file or the terminal reading it.
+    fn focus_a_window_titled(&self, app: &str, title: &str) {
+        *self.windows.lock().unwrap() = vec![Window {
+            id: 7,
+            pid: 99,
+            app: app.into(),
+            title: title.into(),
+            rect: Rect { x: 0, y: 0, w: 100, h: 100 },
+            focused: true,
+            minimized: false,
+        }];
+    }
 }
 
 #[async_trait]
@@ -48,7 +65,7 @@ impl Desktop for FakeDesktop {
         })
     }
     async fn windows(&self) -> Result<Vec<Window>> {
-        Ok(vec![])
+        Ok(self.windows.lock().unwrap().clone())
     }
     async fn focus(&self, target: WindowTarget) -> Result<()> {
         self.actions.lock().unwrap().push(format!("focus {target:?}"));
@@ -99,6 +116,10 @@ struct Harness {
 }
 
 fn harness(name: &str) -> Harness {
+    harness_cfg(name, true)
+}
+
+fn harness_cfg(name: &str, window_titles: bool) -> Harness {
     let mut table = HashMap::new();
     table.insert(ALICE.parse().unwrap(), ident(Some("alice@example.com"), "alice-laptop", &[]));
     table.insert(MONITOR.parse().unwrap(), ident(None, "monitor-1", &["tag:monitor"]));
@@ -113,9 +134,11 @@ fn harness(name: &str) -> Harness {
     let dir = std::env::temp_dir().join(format!("rdc-router-test-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let audit_path = dir.join("audit.jsonl");
-    let audit =
-        Audit::open(&AuditConfig { enabled: true, path: Some(audit_path.clone()), ..Default::default() }, "studio-mac")
-            .unwrap();
+    let audit = Audit::open(
+        &AuditConfig { enabled: true, path: Some(audit_path.clone()), window_titles, ..Default::default() },
+        "studio-mac",
+    )
+    .unwrap();
     let desktop = Arc::new(FakeDesktop::default());
     let state = AppState { desktop: desktop.clone(), auth: Arc::new(auth), audit: Arc::new(audit) };
     Harness { app: routes::router(state), desktop, audit_path }
@@ -129,6 +152,18 @@ async fn call(
     path: &str,
     body: Option<&str>,
 ) -> (StatusCode, String) {
+    let (status, bytes) = call_bytes(h, peer, host, method, path, body).await;
+    (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+async fn call_bytes(
+    h: &Harness,
+    peer: &str,
+    host: &str,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+) -> (StatusCode, Vec<u8>) {
     let mut req = Request::builder().method(method).uri(path).header("host", host);
     if body.is_some() {
         req = req.header("content-type", "application/json");
@@ -138,7 +173,7 @@ async fn call(
     let resp = h.app.clone().oneshot(req).await.unwrap();
     let status = resp.status();
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    (status, String::from_utf8_lossy(&bytes).into_owned())
+    (status, bytes.to_vec())
 }
 
 fn audit_lines(h: &Harness) -> Vec<Entry> {
@@ -280,4 +315,55 @@ async fn hostile_values_cannot_break_the_audit_file() {
     assert!(!raw.contains('\u{1b}') && !raw.contains('\u{7}'), "{raw}");
     let entries = audit_lines(&h);
     assert!(entries[0].action.as_deref().unwrap().contains("fake line"));
+}
+
+#[tokio::test]
+async fn audited_actions_carry_the_focused_window_sanitised() {
+    let h = harness("window");
+    // An application whose name and title are an attempt to inject a terminal escape and to
+    // forge a second audit line.
+    h.desktop.focus_a_window_titled("Term\u{1b}]0;pwned\u{7}", "notes.txt\n{\"outcome\":\"ok\"}");
+    let (status, _) = call(&h, ALICE, "studio-mac.example.ts.net:7770", "POST", "/v1/act", Some(CLICK)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let act = audit_lines(&h).into_iter().find(|e| e.path == "/v1/act").expect("the click was not audited");
+    let window = act.window.expect("no window recorded on an input action");
+    assert!(window.starts_with("Term"), "app and title should both be there: {window:?}");
+    assert!(window.contains("notes.txt"));
+    assert!(!window.contains('\u{1b}') && !window.contains('\u{7}'), "escape survived: {window:?}");
+    assert!(!window.contains('\n'), "a newline would forge a second line: {window:?}");
+    // One request, one line: the injected JSON did not become an entry of its own.
+    assert_eq!(audit_lines(&h).iter().filter(|e| e.path == "/v1/act").count(), 1);
+}
+
+#[tokio::test]
+async fn window_titles_false_omits_the_window() {
+    let h = harness_cfg("no-titles", false);
+    h.desktop.focus_a_window_titled("Mail", "Re: salary review");
+    let (status, _) = call(&h, ALICE, "studio-mac.example.ts.net:7770", "POST", "/v1/act", Some(CLICK)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let act = audit_lines(&h).into_iter().find(|e| e.path == "/v1/act").unwrap();
+    assert_eq!(act.window, None, "window_titles = false must keep titles out of the log");
+    // The rest of the line is unaffected.
+    assert_eq!(act.outcome, "ok");
+    assert!(act.action.unwrap().contains("click"));
+}
+
+#[tokio::test]
+async fn screenshot_hash_matches_the_bytes_that_were_sent() {
+    let h = harness("shot-hash");
+    let (status, body) = call_bytes(&h, ALICE, "studio-mac.example.ts.net:7770", "GET", "/v1/screenshot", None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let shot = audit_lines(&h).into_iter().find(|e| e.path == "/v1/screenshot").unwrap();
+    assert_eq!(
+        shot.screenshot_sha256.as_deref(),
+        Some(sha256_hex(&body).as_str()),
+        "the logged hash must be of the image the caller received"
+    );
+    // Other routes have nothing to hash.
+    let _ = call(&h, ALICE, "studio-mac.example.ts.net:7770", "GET", "/v1/clipboard", None).await;
+    let clip = audit_lines(&h).into_iter().find(|e| e.path == "/v1/clipboard").unwrap();
+    assert_eq!(clip.screenshot_sha256, None);
 }

@@ -43,31 +43,57 @@ pub fn displays() -> Result<Vec<Display>> {
     Ok(out)
 }
 
+/// Read one xcap window into our shape. Every accessor here is a separate query into the
+/// platform's window server — on macOS each one re-runs `CGWindowListCopyWindowInfo` over the
+/// whole desktop — so call this for as few windows as the caller actually needs.
+/// `focused` is passed in because the caller often already knows it more cheaply than
+/// `is_focused()` can work it out.
+fn to_window(w: &xcap::Window, focused: bool) -> Result<Option<Window>> {
+    let title = w.title().unwrap_or_default();
+    let app = w.app_name().unwrap_or_default();
+    if title.is_empty() && app.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(Window {
+        id: w.id().map_err(xe)? as u64,
+        pid: w.pid().unwrap_or(0),
+        app,
+        title,
+        rect: Rect {
+            x: w.x().unwrap_or(0),
+            y: w.y().unwrap_or(0),
+            w: w.width().unwrap_or(0),
+            h: w.height().unwrap_or(0),
+        },
+        focused,
+        minimized: w.is_minimized().unwrap_or(false),
+    }))
+}
+
 pub fn windows() -> Result<Vec<Window>> {
     let ws = xcap::Window::all().map_err(xe)?;
     let mut out = Vec::new();
     for w in ws {
-        let title = w.title().unwrap_or_default();
-        let app = w.app_name().unwrap_or_default();
-        if title.is_empty() && app.is_empty() {
-            continue;
+        let focused = w.is_focused().unwrap_or(false);
+        if let Some(win) = to_window(&w, focused)? {
+            out.push(win);
         }
-        out.push(Window {
-            id: w.id().map_err(xe)? as u64,
-            pid: w.pid().unwrap_or(0),
-            app,
-            title,
-            rect: Rect {
-                x: w.x().unwrap_or(0),
-                y: w.y().unwrap_or(0),
-                w: w.width().unwrap_or(0),
-                h: w.height().unwrap_or(0),
-            },
-            focused: w.is_focused().unwrap_or(false),
-            minimized: w.is_minimized().unwrap_or(false),
-        });
     }
     Ok(out)
+}
+
+/// The frontmost window belonging to `pid`, reading the accessors for that window only.
+///
+/// xcap lists windows front to back, so the match is normally the first entry and the cost is
+/// one window-list query plus the accessors for the single hit, whatever the window count.
+#[cfg(target_os = "macos")]
+pub fn window_of_pid(pid: u32) -> Result<Option<Window>> {
+    for w in xcap::Window::all().map_err(xe)? {
+        if w.pid().unwrap_or(0) == pid {
+            return to_window(&w, true);
+        }
+    }
+    Ok(None)
 }
 
 /// Find the xcap monitor that corresponds to one of our logical displays.

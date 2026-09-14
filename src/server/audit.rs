@@ -38,6 +38,38 @@ pub struct Entry {
     pub detail: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ms: Option<u64>,
+    /// Focused window when the request arrived, as `app: title`, so the log shows what the
+    /// action was aimed at. Omitted when `[serve.audit].window_titles = false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<String>,
+    /// SHA-256 (hex) of the image bytes returned by a screenshot request, so a saved screenshot
+    /// can be matched to the exact audit line that produced it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screenshot_sha256: Option<String>,
+}
+
+/// Longest window title kept in the log; titles can carry document names, URLs and mail
+/// subjects, and the log is not the place for a whole one.
+const MAX_TITLE: usize = 160;
+
+/// `app: title` for one window, truncated to [`MAX_TITLE`] characters.
+pub fn describe_window(w: &crate::proto::Window) -> String {
+    let mut s = if w.app.is_empty() { w.title.clone() } else { format!("{}: {}", w.app, w.title) };
+    if s.chars().count() > MAX_TITLE {
+        s = s.chars().take(MAX_TITLE - 1).collect::<String>() + "…";
+    }
+    s
+}
+
+/// Lower-case hex SHA-256 of `bytes`.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    let d = sha2::Sha256::digest(bytes);
+    let mut s = String::with_capacity(64);
+    for b in d {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
 }
 
 /// Replace control characters (terminal escapes, newlines) so a hostile chord or window title
@@ -63,7 +95,21 @@ impl Entry {
             status: 200,
             detail: None,
             ms: None,
+            window: None,
+            screenshot_sha256: None,
         }
+    }
+
+    /// Window titles come from arbitrary applications: sanitize them like any other string
+    /// that lands in the log.
+    pub fn window(mut self, w: Option<String>) -> Self {
+        self.window = w.map(|w| sanitize(&w));
+        self
+    }
+
+    pub fn screenshot_hash(mut self, bytes: &[u8]) -> Self {
+        self.screenshot_sha256 = Some(sha256_hex(bytes));
+        self
     }
 
     pub fn action(mut self, a: impl AsRef<str>) -> Self {
@@ -96,8 +142,17 @@ impl Entry {
         for f in [&mut self.ts, &mut self.host, &mut self.peer, &mut self.method, &mut self.path, &mut self.outcome] {
             *f = sanitize(f);
         }
-        for v in
-            [&mut self.via, &mut self.login, &mut self.node, &mut self.action, &mut self.detail].into_iter().flatten()
+        for v in [
+            &mut self.via,
+            &mut self.login,
+            &mut self.node,
+            &mut self.action,
+            &mut self.detail,
+            &mut self.window,
+            &mut self.screenshot_sha256,
+        ]
+        .into_iter()
+        .flatten()
         {
             *v = sanitize(v);
         }
@@ -120,11 +175,18 @@ pub struct Audit {
     /// Stamped into entries that do not name a host yet.
     host: String,
     stream: Option<super::stream::Streamer>,
+    window_titles: bool,
 }
 
 impl Audit {
     pub fn disabled() -> Self {
-        Self { sink: None, path: None, host: String::new(), stream: None }
+        Self { sink: None, path: None, host: String::new(), stream: None, window_titles: false }
+    }
+
+    /// Whether handlers should look up the focused window for the log. False when the log is
+    /// off entirely, so the lookup is not paid for when nothing records it.
+    pub fn wants_window_titles(&self) -> bool {
+        self.sink.is_some() && self.window_titles
     }
 
     /// Open the audit file named by `cfg`. `host` is this machine's node name; it is written into
@@ -150,6 +212,7 @@ impl Audit {
             path: Some(path),
             host: host.to_string(),
             stream: None,
+            window_titles: cfg.window_titles,
         })
     }
 
@@ -277,6 +340,56 @@ fn now_rfc3339() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sha256_matches_known_vector() {
+        assert_eq!(sha256_hex(b""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        assert_eq!(sha256_hex(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    }
+
+    #[test]
+    fn window_is_described_and_truncated() {
+        use crate::proto::{Rect, Window};
+        let mk = |app: &str, title: &str| Window {
+            id: 1,
+            pid: 1,
+            app: app.into(),
+            title: title.into(),
+            rect: Rect { x: 0, y: 0, w: 1, h: 1 },
+            focused: true,
+            minimized: false,
+        };
+        assert_eq!(describe_window(&mk("Firefox", "Inbox")), "Firefox: Inbox");
+        assert_eq!(describe_window(&mk("", "Untitled")), "Untitled");
+        let long = "x".repeat(500);
+        let d = describe_window(&mk("Firefox", &long));
+        assert_eq!(d.chars().count(), MAX_TITLE);
+        assert!(d.ends_with('…'));
+    }
+
+    #[test]
+    fn window_titles_are_sanitized() {
+        let e = Entry::new("100.64.0.1", None, "POST", "/v1/act").window(Some("Term: \u{1b}]0;evil\u{7}".into()));
+        let w = e.window.unwrap();
+        assert!(!w.contains('\u{1b}') && !w.contains('\u{7}'), "{w:?}");
+    }
+
+    #[test]
+    fn entry_serializes_new_fields_only_when_set() {
+        let e = Entry::new("100.64.0.1", None, "GET", "/v1/screenshot");
+        let j = serde_json::to_string(&e).unwrap();
+        assert!(!j.contains("window") && !j.contains("screenshot_sha256"));
+        let e = e.window(Some("Terminal: ~".into())).screenshot_hash(b"abc");
+        let j = serde_json::to_string(&e).unwrap();
+        assert!(j.contains("\"window\":\"Terminal: ~\""));
+        assert!(j.contains("\"screenshot_sha256\":\"ba7816bf"));
+        // Old logs without the fields still parse.
+        let old: Entry = serde_json::from_str(
+            r#"{"ts":"t","peer":"p","method":"GET","path":"/v1/state","outcome":"ok","status":200}"#,
+        )
+        .unwrap();
+        assert_eq!(old.window, None);
+    }
 
     #[test]
     fn writes_and_rotates() {

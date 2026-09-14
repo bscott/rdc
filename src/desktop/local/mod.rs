@@ -13,6 +13,11 @@ mod win_windows;
 pub use win_windows::set_dpi_aware;
 
 use super::{Desktop, find_window};
+
+/// How long the per-action focused-window lookup may take before the audit line is written
+/// without it. Short on purpose: this runs before every screenshot, input and clipboard call.
+#[cfg(target_os = "linux")]
+const FOCUS_LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
 use crate::proto::*;
 use async_trait::async_trait;
 use input::InputWorker;
@@ -82,6 +87,45 @@ impl Desktop for LocalDesktop {
         tokio::task::spawn_blocking(capture::windows)
             .await
             .map_err(|e| RdcError::Backend(format!("window task failed: {e}")))?
+    }
+
+    async fn focused_window(&self) -> Result<Option<Window>> {
+        #[cfg(target_os = "linux")]
+        if let Some(h) = &self.hypr {
+            let h = *h;
+            // `hyprctl` is a subprocess: never run it on an executor thread, and never let a
+            // wedged compositor hold up an action. The audit line is context, not the request.
+            // A timed-out `spawn_blocking` task cannot be cancelled, so it is left to finish
+            // and its result dropped.
+            return match tokio::time::timeout(
+                FOCUS_LOOKUP_TIMEOUT,
+                tokio::task::spawn_blocking(move || h.focused_window()),
+            )
+            .await
+            {
+                Ok(Ok(r)) => r,
+                Ok(Err(e)) => Err(RdcError::Backend(format!("focused-window task failed: {e}"))),
+                Err(_) => {
+                    tracing::debug!("hyprctl activewindow did not answer within {FOCUS_LOOKUP_TIMEOUT:?}");
+                    Ok(None)
+                }
+            };
+        }
+        #[cfg(target_os = "macos")]
+        {
+            return tokio::task::spawn_blocking(win_mac::focused_window)
+                .await
+                .map_err(|e| RdcError::Backend(format!("focused-window task failed: {e}")))?;
+        }
+        #[cfg(target_os = "windows")]
+        {
+            return tokio::task::spawn_blocking(win_windows::focused_window)
+                .await
+                .map_err(|e| RdcError::Backend(format!("focused-window task failed: {e}")))?;
+        }
+        // X11 and other Linux compositors: no single-window query, so filter the list.
+        #[allow(unreachable_code)]
+        Ok(self.windows().await?.into_iter().find(|w| w.focused))
     }
 
     async fn focus(&self, target: WindowTarget) -> Result<()> {
