@@ -5,16 +5,77 @@
 use crate::proto::*;
 use std::ffi::c_void;
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+use windows::Win32::System::Threading::{
+    AttachThreadInput, GetCurrentThreadId, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+    QueryFullProcessImageNameW,
+};
 use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_MOVE, MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT, SendInput,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    BringWindowToTop, GetForegroundWindow, GetSystemMetrics, GetWindowThreadProcessId, IsIconic, SM_CXVIRTUALSCREEN,
-    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SMTO_ABORTIFHUNG, SMTO_BLOCK, SW_RESTORE,
-    SendMessageTimeoutW, SetForegroundWindow, ShowWindow, WM_NULL,
+    BringWindowToTop, GetForegroundWindow, GetSystemMetrics, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
+    GetWindowThreadProcessId, IsIconic, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    SMTO_ABORTIFHUNG, SMTO_BLOCK, SW_RESTORE, SendMessageTimeoutW, SetForegroundWindow, ShowWindow, WM_NULL,
 };
+use windows::core::PWSTR;
+
+/// The foreground window via `GetForegroundWindow`: one handle, one title read, one process
+/// name lookup. Orders of magnitude cheaper than enumerating every top-level window.
+pub fn focused_window() -> Result<Option<Window>> {
+    // SAFETY: plain Win32 queries on a handle we just obtained; every call tolerates a stale
+    // or NULL handle by returning zero/error, which we map to None.
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.0.is_null() {
+            return Ok(None);
+        }
+        let len = GetWindowTextLengthW(hwnd);
+        let mut buf = vec![0u16; (len.max(0) as usize) + 1];
+        let n = GetWindowTextW(hwnd, &mut buf);
+        let title = String::from_utf16_lossy(&buf[..n.max(0) as usize]);
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        let app = process_image_name(pid).unwrap_or_default();
+        let mut r = windows::Win32::Foundation::RECT::default();
+        let _ = GetWindowRect(hwnd, &mut r);
+        Ok(Some(Window {
+            id: hwnd.0 as usize as u64,
+            pid,
+            app,
+            title,
+            rect: Rect {
+                x: r.left,
+                y: r.top,
+                w: (r.right - r.left).max(0) as u32,
+                h: (r.bottom - r.top).max(0) as u32,
+            },
+            focused: true,
+            minimized: IsIconic(hwnd).as_bool(),
+        }))
+    }
+}
+
+/// `foo.exe` → `foo`, matching what xcap reports as the app name.
+fn process_image_name(pid: u32) -> Option<String> {
+    if pid == 0 {
+        return None;
+    }
+    // SAFETY: the handle is closed before returning; the buffer length is passed alongside it.
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut buf = vec![0u16; 1024];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len).is_ok();
+        let _ = windows::Win32::Foundation::CloseHandle(h);
+        if !ok {
+            return None;
+        }
+        let full = String::from_utf16_lossy(&buf[..len as usize]);
+        let file = full.rsplit(['\\', '/']).next().unwrap_or(&full);
+        Some(file.strip_suffix(".exe").or_else(|| file.strip_suffix(".EXE")).unwrap_or(file).to_string())
+    }
+}
 
 /// Make every metric and capture in this process use physical pixels, so `GetSystemMetrics`
 /// agrees with the physical geometry xcap reports. Call once at startup, before any UI call.

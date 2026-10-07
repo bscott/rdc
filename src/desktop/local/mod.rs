@@ -84,6 +84,36 @@ impl Desktop for LocalDesktop {
             .map_err(|e| RdcError::Backend(format!("window task failed: {e}")))?
     }
 
+    async fn focused_window(&self) -> Result<Option<Window>> {
+        // Every backend here talks to a window server or a subprocess, so none of it belongs on
+        // an executor thread. How long it may take is bounded by the caller; see
+        // `server::routes::FOCUS_LOOKUP_TIMEOUT`.
+        #[cfg(target_os = "linux")]
+        if let Some(h) = &self.hypr {
+            let h = *h;
+            return tokio::task::spawn_blocking(move || h.focused_window())
+                .await
+                .map_err(|e| RdcError::Backend(format!("focused-window task failed: {e}")))?;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            return tokio::task::spawn_blocking(win_mac::focused_window)
+                .await
+                .map_err(|e| RdcError::Backend(format!("focused-window task failed: {e}")))?;
+        }
+        #[cfg(target_os = "windows")]
+        {
+            return tokio::task::spawn_blocking(win_windows::focused_window)
+                .await
+                .map_err(|e| RdcError::Backend(format!("focused-window task failed: {e}")))?;
+        }
+        // X11 and other Linux compositors have no single-window query of their own.
+        #[allow(unreachable_code)]
+        tokio::task::spawn_blocking(capture::focused_window)
+            .await
+            .map_err(|e| RdcError::Backend(format!("focused-window task failed: {e}")))?
+    }
+
     async fn focus(&self, target: WindowTarget) -> Result<()> {
         let windows = self.windows().await?;
         let w = find_window(&windows, &target)

@@ -5,6 +5,40 @@ builds the GitHub release body from the matching `## <version>` section.
 
 ## Unreleased
 
+## 0.5.0 — 2026-10-07
+
+### Changed
+- **Breaking: `rdc serve` refuses to run with root privileges** (thanks @Mrigbozurike). It never
+  needs them and a remote-control surface should not hold them; started with a real or
+  effective uid of 0 (`sudo rdc serve`, a system-level unit, a container whose process is root,
+  a setuid-root binary) it exits with a message. Run it as the desktop user instead. `rdc doctor`
+  reports the process user and flags root. Unix only.
+
+### Added
+- **Audit lines record the focused window and the screenshot hash.** Screenshot, input, focus
+  and clipboard entries carry `window` (`app: title` of the window that had focus when the
+  request arrived, sanitised and truncated like every other field), and screenshot entries carry
+  `screenshot_sha256` of the bytes returned, so an action can be tied to what was on screen and
+  a saved image to the line that produced it. The lookup is a direct focused-window query per
+  platform — `GetForegroundWindow` on Windows, `hyprctl activewindow` on Hyprland,
+  `NSWorkspace`'s `activeApplication` on macOS — and reads the title and application of that one
+  window, rather than enumerating the desktop. It runs off the request thread under one timeout
+  for every backend; `rdc doctor` reports how long it takes. Titles are recorded by default and
+  can carry document names, URLs and mail subjects, in the local log and in any audit stream;
+  `[serve.audit].window_titles = false` omits them (thanks @Mrigbozurike).
+- **The systemd `--user` unit is sandboxed.** `rdc service install` writes `NoNewPrivileges`,
+  a `@system-service` syscall filter minus `@privileged`/`@resources`, `RestrictAddressFamilies`,
+  `RestrictNamespaces`/`RestrictRealtime`/`RestrictSUIDSGID`/`LockPersonality` and `UMask=0077`
+  into the unit, and the directives that need user namespaces (`PrivateUsers`, an empty
+  capability set, the `Protect*` family, `ProtectSystem=strict`, `ProtectHome=read-only`,
+  `PrivateTmp` with the X11 socket bound back) into a drop-in written only when a real
+  `systemd-run --user` probe starts a transient unit carrying them, since those would otherwise
+  stop the unit from starting at all. Paths are quoted and `%` escaped, so a binary or audit
+  directory containing a space or a percent sign is written correctly. Installing restarts a
+  running daemon rather than leaving the old one in place, and the unit is `Type=exec`, so
+  install can wait past `RestartSec` and confirm `NRestarts` is 0 instead of mistaking a restart
+  loop for success (thanks @Mrigbozurike).
+
 ## 0.4.0 — 2026-09-11
 
 ### Added

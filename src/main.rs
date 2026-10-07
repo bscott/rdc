@@ -4,6 +4,7 @@ mod doctor;
 mod keys;
 mod mcp;
 mod permissions;
+mod privdrop;
 mod proto;
 mod server;
 mod service;
@@ -242,6 +243,7 @@ async fn run(cli: Cli) -> Result<()> {
 
     match cli.cmd {
         Cmd::Serve { bind, port, allow, audit_stream, dev_loopback } => {
+            privdrop::refuse_root()?;
             config::enforce_permissions()?;
             let desktop: Arc<dyn Desktop> = Arc::new(LocalDesktop::new()?);
             let ts = tailscale::Tailscale::detect();
@@ -343,7 +345,15 @@ async fn run(cli: Cli) -> Result<()> {
                     let who = clean(&e.login.clone().or(e.node.clone()).unwrap_or_else(|| e.peer.clone()));
                     let what = clean(&e.action.clone().unwrap_or_else(|| format!("{} {}", e.method, e.path)));
                     let detail = e.detail.as_deref().map(|d| format!("  ({})", clean(d))).unwrap_or_default();
-                    println!("{:<24} {:<28} {:<7} {:<4} {what}{detail}", e.ts, who, e.outcome, e.status);
+                    let window = e.window.as_deref().map(|w| format!("  [{}]", clean(w))).unwrap_or_default();
+                    // Entries can arrive from the network, so the "hash" is untrusted text:
+                    // clean it and take characters, never bytes.
+                    let hash = e
+                        .screenshot_sha256
+                        .as_deref()
+                        .map(|h| format!("  sha256:{}", clean(h).chars().take(12).collect::<String>()))
+                        .unwrap_or_default();
+                    println!("{:<24} {:<28} {:<7} {:<4} {what}{window}{hash}{detail}", e.ts, who, e.outcome, e.status);
                 }
                 if entries.is_empty() {
                     eprintln!("no entries in {}", path.display());

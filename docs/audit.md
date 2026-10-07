@@ -35,6 +35,8 @@ One entry:
 | `status` | HTTP status returned |
 | `detail` | why it was denied or failed |
 | `ms` | how long the request took |
+| `window` | the focused window when the request arrived, as `app: title`, truncated to 160 characters. Omitted when `[serve.audit].window_titles = false`, when nothing was focused, or when the lookup did not answer in time. |
+| `screenshot_sha256` | SHA-256 of the image bytes a screenshot request returned, so a saved screenshot can be matched to the line that produced it |
 | `via` | added by the viewer: the node that sent this entry over the network |
 
 Strings from the network (window titles, key chords, host names) have control characters

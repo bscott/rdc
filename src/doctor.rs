@@ -17,6 +17,17 @@ fn line(ok: Option<bool>, what: &str, detail: impl AsRef<str>) {
 pub async fn run(request_permissions: bool) -> anyhow::Result<bool> {
     let mut healthy = true;
     line(None, "platform", format!("{} {}", std::env::consts::OS, std::env::consts::ARCH));
+    let me = crate::privdrop::current();
+    if me.is_root() {
+        healthy = false;
+        line(
+            Some(false),
+            "process user",
+            format!("{} — `rdc serve` refuses root privileges; run it as the desktop user", me.describe()),
+        );
+    } else {
+        line(Some(true), "process user", me.describe());
+    }
     let perms = if request_permissions { crate::permissions::request() } else { crate::permissions::check() };
     for (name, granted) in perms {
         if !granted {
@@ -142,6 +153,20 @@ pub async fn run(request_permissions: bool) -> anyhow::Result<bool> {
                 format!("{e} (macOS: grant Screen Recording; Wayland: portal/screencopy missing?)"),
             );
         }
+    }
+    let t0 = std::time::Instant::now();
+    match desk.focused_window().await {
+        Ok(w) => line(
+            None,
+            "focused window",
+            format!(
+                "{} in {:?} (looked up before every audited action; `[serve.audit].window_titles = false` to skip)",
+                w.map(|w| crate::server::audit::sanitize(&crate::server::audit::describe_window(&w)))
+                    .unwrap_or_else(|| "none".into()),
+                t0.elapsed()
+            ),
+        ),
+        Err(e) => line(None, "focused window", format!("{e}")),
     }
     match desk.windows().await {
         Ok(ws) => line(
