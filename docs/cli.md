@@ -22,6 +22,7 @@ empty allowlist.
 | `--port N` | listen port |
 | `--bind IP` | listen address (must be a Tailscale address) |
 | `--dev-loopback` | bind 127.0.0.1 and skip authentication for loopback. **Testing only.** |
+| `--user NAME` | Unix: if started with root privileges, drop to this account after binding (default `[serve].user`). rdc refuses to serve as root otherwise. See [Running as a dedicated user](setup-linux.md#running-as-a-dedicated-user). |
 
 ### `rdc service install [--elevated] | uninstall | status`
 

@@ -2,6 +2,7 @@ mod config;
 mod desktop;
 mod doctor;
 mod keys;
+mod logging;
 mod mcp;
 mod permissions;
 mod privdrop;
@@ -57,6 +58,10 @@ enum Cmd {
         /// Bind 127.0.0.1 and skip authentication for loopback. Testing only.
         #[arg(long)]
         dev_loopback: bool,
+        /// Unix: if started with root privileges, drop to this account right after binding the
+        /// port (default `[serve].user`). rdc refuses to serve as root without it.
+        #[arg(long)]
+        user: Option<String>,
     },
     /// Collect audit entries streamed from `rdc serve` instances and show them live in a browser.
     AuditView {
@@ -207,21 +212,17 @@ async fn main() -> Result<()> {
     let to_file = cli.log_file.is_some();
     match &cli.log_file {
         Some(p) => {
-            if let Some(dir) = p.parent() {
-                std::fs::create_dir_all(dir).ok();
-            }
-            let mut opts = std::fs::OpenOptions::new();
-            opts.create(true).append(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                opts.mode(0o600);
-            }
-            let file = opts.open(p).with_context(|| format!("opening log file {}", p.display()))?;
+            // When `serve` is going to drop privileges, the file is opened after the drop, by
+            // the account that will own it; see `logging`.
+            let sink = if serve_will_drop_privileges(&cli.cmd) {
+                logging::Sink::deferred(p)
+            } else {
+                logging::Sink::open(p).with_context(|| format!("opening log file {}", p.display()))?
+            };
             tracing_subscriber::fmt()
                 .with_env_filter(filter)
                 .with_ansi(false)
-                .with_writer(std::sync::Mutex::new(file))
+                .with_writer(logging::install(sink))
                 .init();
         }
         None => tracing_subscriber::fmt().with_env_filter(filter).with_writer(std::io::stderr).init(),
@@ -236,14 +237,29 @@ async fn main() -> Result<()> {
     result
 }
 
+/// Will this command hand the process to another account? Decided before logging is set up,
+/// because it decides when the log file may be opened.
+fn serve_will_drop_privileges(cmd: &Cmd) -> bool {
+    match cmd {
+        // A config error is not reported here; `run` loads the config properly and will fail
+        // with a good message. All that matters now is whether a drop is possible.
+        Cmd::Serve { user, .. } => user.is_some() || config::load().ok().and_then(|c| c.serve.user).is_some(),
+        _ => false,
+    }
+}
+
 async fn run(cli: Cli) -> Result<()> {
     #[cfg(target_os = "windows")]
     desktop::local::set_dpi_aware();
     let cfg = config::load()?;
+    let log_file = cli.log_file.clone();
 
     match cli.cmd {
-        Cmd::Serve { bind, port, allow, audit_stream, dev_loopback } => {
-            privdrop::refuse_root()?;
+        Cmd::Serve { bind, port, allow, audit_stream, dev_loopback, user } => {
+            let user = user.or_else(|| cfg.serve.user.clone());
+            if user.is_none() {
+                privdrop::refuse_root()?;
+            }
             config::enforce_permissions()?;
             let desktop: Arc<dyn Desktop> = Arc::new(LocalDesktop::new()?);
             let ts = tailscale::Tailscale::detect();
@@ -266,6 +282,8 @@ async fn run(cli: Cli) -> Result<()> {
                     audit,
                     hosts: cfg.serve.hosts.clone(),
                     dev_loopback,
+                    user,
+                    log_file: log_file.clone(),
                 },
             )
             .await
