@@ -215,6 +215,11 @@ pub struct AuditConfig {
     /// which identifies the sender through Tailscale.
     #[serde(default)]
     pub stream_token: Option<String>,
+    /// Record the focused window (`app: title`) on every screenshot, input, focus and
+    /// clipboard request. Default on. Titles can reveal document names, URLs or mail subjects;
+    /// turn this off if the log is read by people who should not see them.
+    #[serde(default = "yes")]
+    pub window_titles: bool,
 }
 
 impl Default for AuditConfig {
@@ -226,6 +231,7 @@ impl Default for AuditConfig {
             keep: default_audit_keep(),
             stream: None,
             stream_token: None,
+            window_titles: true,
         }
     }
 }
@@ -293,6 +299,8 @@ impl AuditViewConfig {
             keep: self.keep,
             stream: None,
             stream_token: None,
+            // The viewer stores what daemons send; it never looks up windows itself.
+            window_titles: false,
         }
     }
 }
@@ -554,6 +562,9 @@ allow = [{ who = "x", can = "shell" }]"#,
         let cfg: Config = toml::from_str("[serve]\nallow = ['a']").unwrap();
         assert!(cfg.serve.audit.enabled);
         assert_eq!(cfg.serve.audit.max_size_mb, 50);
+        assert!(cfg.serve.audit.window_titles);
+        let cfg: Config = toml::from_str("[serve.audit]\nwindow_titles = false").unwrap();
+        assert!(!cfg.serve.audit.window_titles);
         let cfg: Config = toml::from_str("[serve.audit]\nenabled = false\npath = '/tmp/x.jsonl'").unwrap();
         assert!(!cfg.serve.audit.enabled);
         assert_eq!(cfg.serve.audit.resolved_path(), PathBuf::from("/tmp/x.jsonl"));

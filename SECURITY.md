@@ -33,6 +33,14 @@ TLS: the tailnet's WireGuard layer provides encryption and the identity.
 - The config file is the allowlist. On Unix the daemon refuses to start if `config.toml` or its
   directory is owned by someone else or writable by group/others, since editing it is
   equivalent to desktop access; `RDC_INSECURE_CONFIG=1` overrides with a warning.
+- The daemon does not run with root privileges: started with a real or effective uid of 0 (a
+  system unit, `sudo`, a setuid binary), `rdc serve` exits. It never needs them (the port is
+  unprivileged, everything else happens inside the desktop session), and a remote-control surface
+  should not hold them. On Windows, `rdc service install` creates the logon task at standard
+  integrity unless `--elevated` is passed.
+- `rdc serve` installs no service: only `rdc service install` creates a unit, LaunchAgent or
+  scheduled task, and `rdc service uninstall` removes it. `rdc serve` does write the audit log
+  (and any `--log-file`) under your user's state directory; nothing else outlives the process.
 - `--dev-loopback` binds 127.0.0.1 and disables authentication for loopback connections. It is
   for local development and must never be used on a shared machine or forwarded.
 - MCP clients talk to `rdc mcp` over stdio on the operator's machine. The operator's agent
@@ -41,8 +49,11 @@ TLS: the tailnet's WireGuard layer provides encryption and the identity.
   signed bundle you built or verified; see `scripts/macos`.
 
 **Audit.** Every request and rejection is appended to a JSON-lines audit log (mode 0600, size
-rotated) with the caller's identity, an action summary, the outcome and timing. Typed text is
-never logged, only its length. Read it with `rdc audit`.
+rotated) with a timestamp, the caller's identity, an action summary, the focused window's
+`app: title` at the moment of the request, the outcome and timing, and for screenshots the
+SHA-256 of the returned image. Typed text is never logged, only its length. Window titles can be
+switched off (`[serve.audit].window_titles = false`) where they would leak more than they
+explain. Read it with `rdc audit`.
 
 **Not yet implemented** (tracked as issues): rate limiting, and a pause when a human is
 physically using the input devices.

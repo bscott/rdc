@@ -17,6 +17,14 @@ pub trait Desktop: Send + Sync {
     async fn clipboard_get(&self) -> Result<String>;
     async fn clipboard_set(&self, text: String) -> Result<()>;
 
+    /// The window that currently has focus, for audit context. This is not a new capability
+    /// (it is a subset of [`Desktop::windows`]) and is not exposed on the wire; it exists so the
+    /// daemon can record "what was in front" per action without paying for a full enumeration.
+    /// Backends override it with a direct query where the platform has one.
+    async fn focused_window(&self) -> Result<Option<Window>> {
+        Ok(self.windows().await?.into_iter().find(|w| w.focused))
+    }
+
     async fn state(&self) -> Result<State> {
         Ok(State { displays: self.displays().await?, windows: self.windows().await? })
     }
