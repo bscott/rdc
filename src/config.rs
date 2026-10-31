@@ -42,6 +42,10 @@ pub struct ServeConfig {
     pub hosts: Vec<String>,
     #[serde(default)]
     pub audit: AuditConfig,
+    /// Unix: the account to drop to right after binding, when the daemon was started with root
+    /// privileges. Without it, `rdc serve` refuses to run with them at all.
+    #[serde(default)]
+    pub user: Option<String>,
 }
 
 impl Default for ServeConfig {
@@ -53,6 +57,7 @@ impl Default for ServeConfig {
             grant: vec![],
             hosts: vec![],
             audit: AuditConfig::default(),
+            user: None,
         }
     }
 }

@@ -33,11 +33,19 @@ TLS: the tailnet's WireGuard layer provides encryption and the identity.
 - The config file is the allowlist. On Unix the daemon refuses to start if `config.toml` or its
   directory is owned by someone else or writable by group/others, since editing it is
   equivalent to desktop access; `RDC_INSECURE_CONFIG=1` overrides with a warning.
-- The daemon does not run with root privileges: started with a real or effective uid of 0 (a
-  system unit, `sudo`, a setuid binary), `rdc serve` exits. It never needs them (the port is
-  unprivileged, everything else happens inside the desktop session), and a remote-control surface
-  should not hold them. On Windows, `rdc service install` creates the logon task at standard
-  integrity unless `--elevated` is passed.
+- The daemon does not serve with root privileges. Started with a real or effective uid of 0 (a
+  system unit, `sudo`, a setuid binary), `rdc serve` exits — unless it was started as real root
+  *and* `[serve].user` names an ordinary account to drop to, in which case it binds the port,
+  replaces its supplementary groups and its gid and uid with that account's, verifies that
+  regaining root now fails, and only then opens the audit log, any `--log-file`, and accepts
+  requests. Privileges that arrived from a setuid bit never qualify: the caller would be
+  choosing the account, and through `--log-file` the file to create. A failed drop is fatal. It never needs
+  root anyway (the port is unprivileged, everything else happens inside the desktop session),
+  and a remote-control surface should not hold it. The config file is read before the drop, from
+  the *starting* user's directory, so under `sudo` the allowlist is root-owned and the dropped
+  account cannot edit it; see [Running as a dedicated user](docs/setup-linux.md#running-as-a-dedicated-user).
+  On Windows, `rdc service install` creates the logon task at standard integrity unless
+  `--elevated` is passed.
 - `rdc serve` installs no service: only `rdc service install` creates a unit, LaunchAgent or
   scheduled task, and `rdc service uninstall` removes it. `rdc serve` does write the audit log
   (and any `--log-file`) under your user's state directory; nothing else outlives the process.

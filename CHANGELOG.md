@@ -5,6 +5,18 @@ builds the GitHub release body from the matching `## <version>` section.
 
 ## Unreleased
 
+### Added
+- **`[serve].user` / `--user`: drop privileges after binding.** When rdc is started with root
+  privileges and a target account is configured, it binds the port, switches user
+  (`initgroups`/`setgid`/`setuid`, then verifies that regaining root fails) and only then opens
+  the audit log — in that account's state directory, derived from its passwd entry rather than
+  from `HOME`, which the process never modifies — and serves. Any `--log-file` is opened after
+  the drop too, as that account, so root never creates a file in a directory the account
+  controls or follows a symlink left there. uid 0 and gid 0 targets are refused, and so is a
+  start whose root privileges came from a setuid bit rather than from being root. Unix only; a
+  separate account can only see the desktop on X11, which the Linux setup guide explains, and
+  that path is untested on real hardware.
+
 ## 0.5.0 — 2026-10-07
 
 ### Changed
